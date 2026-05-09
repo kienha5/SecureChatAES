@@ -89,14 +89,25 @@ void handleClient(SSL* ssl) {
             // Bước 4: Check replay (nonce đã dùng chưa)
             {
                 std::lock_guard<std::mutex> lock(g_nonceMutex);
+
+                // Safely get up to 16 characters for logging
+                std::string safeNonceLog = clientNonce.substr(0, std::min<size_t>(16, clientNonce.length()));
+
                 if (g_usedNonces.count(clientNonce)) {
-                    Utils::log(Utils::LogLevel::WARN, "RA", "Replay detected: nonce reused");
+                    Utils::log(Utils::LogLevel::WARN, "RA",
+                        "REPLAY ATTACK DETECTED - nonce already used: " + safeNonceLog + "...");
+                    Utils::log(Utils::LogLevel::WARN, "RA",
+                        "Request from potential attacker blocked");
+
                     Message err; err.type = MessageType::ERROR_MSG;
-                    err.payload["reason"] = "Replay detected";
+                    err.payload["reason"] = "Replay attack detected - nonce already used";
                     Protocol::sendMessage(ssl, err);
                     goto cleanup;
                 }
+
                 g_usedNonces.insert(clientNonce);
+                Utils::log(Utils::LogLevel::INFO, "RA",
+                    "Nonce accepted and recorded: " + safeNonceLog + "...");
             }
 
             // Bước 5: Verify nonce match

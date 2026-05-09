@@ -3,6 +3,7 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="Admin/Admin.vcxproj" Id="73b56c36-f642-42c2-b4cf-59272b2ab0fe" />
   <Project Path="CA_Server/CA_Server.vcxproj" Id="ac3a97c7-7a59-4b66-afa9-2b22fae9149e" />
   <Project Path="Chat_Server/Chat_Server.vcxproj" Id="f847359c-0dfc-4f58-acd2-91c909a7f5c9" />
   <Project Path="Client/Client.vcxproj" Id="fc1a3347-53d0-405f-823e-7d187da72388" />

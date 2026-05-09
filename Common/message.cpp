@@ -6,7 +6,7 @@
 
 namespace Protocol {
 
-    // ─── MessageType → string ─────────────────────────────────
+    // ─── MessageType -> string ─────────────────────────────────
     static std::string typeToString(MessageType t) {
         switch (t) {
         case MessageType::CHALLENGE:     return "CHALLENGE";
@@ -17,6 +17,9 @@ namespace Protocol {
         case MessageType::CERT_STATUS:   return "CERT_STATUS";
         case MessageType::SUCCESS:       return "SUCCESS";
         case MessageType::ERROR_MSG:     return "ERROR_MSG";
+
+        case MessageType::REVOKE_CERT:    return "REVOKE_CERT";
+        case MessageType::REVOKE_SUCCESS: return "REVOKE_SUCCESS";
 
         case MessageType::KDC_REGISTER_INIT:    return "KDC_REGISTER_INIT";
         case MessageType::KDC_REGISTER:         return "KDC_REGISTER";
@@ -47,6 +50,9 @@ namespace Protocol {
         if (s == "CERT_STATUS")    return MessageType::CERT_STATUS;
         if (s == "SUCCESS")        return MessageType::SUCCESS;
         if (s == "ERROR_MSG")      return MessageType::ERROR_MSG;
+
+        if (s == "REVOKE_CERT")    return MessageType::REVOKE_CERT;
+        if (s == "REVOKE_SUCCESS") return MessageType::REVOKE_SUCCESS;
 
         if (s == "KDC_REGISTER_INIT")    return MessageType::KDC_REGISTER_INIT;
         if (s == "KDC_REGISTER")         return MessageType::KDC_REGISTER;

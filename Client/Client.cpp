@@ -324,21 +324,50 @@ bool getTicketFromAS(const std::string& username, KerberosSession& session) {
         auto iv_resp = Utils::base64Decode(resp.payload["iv_resp"]);
 
         // Giải mã bằng Kc
-        auto decResp = Crypto::aesDecrypt(session.Kc, iv_resp, encResp);
-        std::string decStr(decResp.begin(), decResp.end());
-        json decJson = json::parse(decStr);
+        std::vector<unsigned char> decResp;
+        try {
+            decResp = Crypto::aesDecrypt(session.Kc, iv_resp, encResp);
+            if (decResp.empty()) {
+                Utils::log(Utils::LogLevel::ERR, "Client",
+                    "Wrong password - failed to decrypt TGT");
+                goto cleanup;
+            }
+            std::string decStr(decResp.begin(), decResp.end());
 
-        // Lưu Kc_tgs + TGT
-        session.Kc_tgs = Utils::base64Decode(decJson["Kc_tgs"]);
-        session.ticket_tgs_b64 = decJson["ticket_tgs"];
-        session.iv_tgt_b64 = decJson["iv_tgt"];
+            // Kiem tra JSON hop le truoc khi parse
+            if (decStr.empty() || decStr[0] != '{') {
+                Utils::log(Utils::LogLevel::ERR, "Client",
+                    "Wrong password - decrypted data is not valid JSON");
+                goto cleanup;
+            }
 
-        Utils::log(Utils::LogLevel::INFO, "Client", "TGT received and decrypted OK");
+            json decJson = json::parse(decStr);
 
-        int sock = SSL_get_fd(ssl);
-        Network::closeConnection(ssl, sock);
-        Network::freeContext(ctx);
-        return true;
+            // Kiem tra co du fields khong
+            if (!decJson.contains("Kc_tgs") ||
+                !decJson.contains("ticket_tgs") ||
+                !decJson.contains("iv_tgt")) {
+                Utils::log(Utils::LogLevel::ERR, "Client",
+                    "Wrong password - missing fields in decrypted TGT");
+                goto cleanup;
+            }
+
+            session.Kc_tgs = Utils::base64Decode(decJson["Kc_tgs"]);
+            session.ticket_tgs_b64 = decJson["ticket_tgs"];
+            session.iv_tgt_b64 = decJson["iv_tgt"];
+
+            Utils::log(Utils::LogLevel::INFO, "Client", "TGT received and decrypted OK");
+
+            int sock = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, sock);
+            Network::freeContext(ctx);
+            return true;
+        }
+        catch (std::exception& e) {
+            Utils::log(Utils::LogLevel::ERR, "Client",
+                "Wrong password - decryption failed: " + std::string(e.what()));
+            goto cleanup;
+        }
     }
 
 cleanup:
@@ -759,6 +788,94 @@ bool loginToServer(const std::string& username,
     return true;
 }
 
+// ─── Test replay attack ───────────────────────────────────────
+void testReplayAttack(const std::string& username) {
+    Utils::log(Utils::LogLevel::INFO, "Client",
+        "=== REPLAY ATTACK TEST ===");
+
+    std::string certPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".crt");
+    std::string privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+    if (certPEM.empty() || privKeyPEM.empty()) {
+        Utils::log(Utils::LogLevel::ERR, "Client", "No cert/key found");
+        return;
+    }
+
+    // ── Lan 1: Ket noi binh thuong, lay nonce ─────────────────
+    SSL_CTX* ctx1 = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL* ssl1 = Network::connectToServer(ctx1, "127.0.0.1", 5001);
+    if (!ssl1) { Network::freeContext(ctx1); return; }
+
+    // Nhan challenge
+    Message challenge = Protocol::recvMessage(ssl1);
+    std::string nonceB64 = challenge.payload["nonce"];
+    Utils::log(Utils::LogLevel::INFO, "Client",
+        "Got nonce from RA: " + nonceB64.substr(0, 16) + "...");
+
+    // Ky nonce
+    auto nonceBytes = Utils::base64Decode(nonceB64);
+    auto sig = Crypto::signData(privKeyPEM, nonceBytes);
+    std::string sigB64 = Utils::base64Encode(sig);
+
+    // Gui lan 1 - hop le
+    Message req1;
+    req1.type = MessageType::REGISTER_CERT;
+    req1.payload["username"] = username + "_replay_test";
+    req1.payload["public_key"] = certPEM;
+    req1.payload["signature"] = sigB64;
+    req1.payload["nonce"] = nonceB64;
+    req1.payload["timestamp"] = Utils::getTimestamp();
+    Protocol::sendMessage(ssl1, req1);
+
+    Message resp1 = Protocol::recvMessage(ssl1);
+    Utils::log(Utils::LogLevel::INFO, "Client",
+        "Attempt 1 (legitimate): " +
+        std::string(resp1.type != MessageType::ERROR_MSG ? "ACCEPTED" : "REJECTED"));
+
+    int sock1 = SSL_get_fd(ssl1);
+    Network::closeConnection(ssl1, sock1);
+    Network::freeContext(ctx1);
+
+    // ── Lan 2: Replay - dung lai nonce cu ─────────────────────
+    Sleep(500);
+    Utils::log(Utils::LogLevel::WARN, "Client",
+        "Attempting REPLAY with same nonce...");
+
+    SSL_CTX* ctx2 = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL* ssl2 = Network::connectToServer(ctx2, "127.0.0.1", 5001);
+    if (!ssl2) { Network::freeContext(ctx2); return; }
+
+    // Bo qua challenge moi, dung nonce cu
+    Message newChallenge = Protocol::recvMessage(ssl2);
+    // INTENTIONALLY ignore newChallenge.payload["nonce"]
+    // va dung lai nonceB64 cu
+
+    Message req2;
+    req2.type = MessageType::REGISTER_CERT;
+    req2.payload["username"] = username + "_replay_test";
+    req2.payload["public_key"] = certPEM;
+    req2.payload["signature"] = sigB64;     // sig cu
+    req2.payload["nonce"] = nonceB64;   // nonce cu - day la replay
+    req2.payload["timestamp"] = Utils::getTimestamp();
+    Protocol::sendMessage(ssl2, req2);
+
+    Message resp2 = Protocol::recvMessage(ssl2);
+    if (resp2.type == MessageType::ERROR_MSG) {
+        std::string reason = resp2.payload["reason"];
+        Utils::log(Utils::LogLevel::INFO, "Client",
+            "Attempt 2 (REPLAY): BLOCKED - " + reason);
+        Utils::log(Utils::LogLevel::INFO, "Client",
+            "=== REPLAY ATTACK TEST PASSED ===");
+    }
+    else {
+        Utils::log(Utils::LogLevel::ERR, "Client",
+            "Attempt 2 (REPLAY): NOT BLOCKED - SECURITY ISSUE!");
+    }
+
+    int sock2 = SSL_get_fd(ssl2);
+    Network::closeConnection(ssl2, sock2);
+    Network::freeContext(ctx2);
+}
+
 int main() {
     Utils::log(Utils::LogLevel::INFO, "Client", "=== Secure Chat Client ===");
     Sleep(2000);
@@ -778,6 +895,8 @@ int main() {
     std::cout << "[3] Register KDC\n";
     std::cout << "[4] Login (AS -> TGS -> Chat Server)\n";
     std::cout << "[5] Do all steps\n";
+    std::cout << "[6] Test replay attack\n";      
+    std::cout << "[7] Test expired ticket\n";
     std::cout << "Choice: ";
     std::cin >> choice;
 
@@ -828,6 +947,56 @@ int main() {
             Utils::log(Utils::LogLevel::ERR, "Client", "Chat Server login failed.");
             system("pause"); return 1;
         }
+    }
+
+    if (choice == 6) {
+        testReplayAttack(username);
+        system("pause");
+        return 0;
+    }
+
+    if (choice == 7) {
+        Utils::log(Utils::LogLevel::INFO, "Client",
+            "=== EXPIRED TICKET TEST ===");
+        Utils::log(Utils::LogLevel::INFO, "Client",
+            "Make sure KDC was started with: KDC_Server.exe 10");
+
+        // Tao Kc tu password
+        std::string password;
+        std::cout << "Enter password: ";
+        std::cin >> password;
+        std::vector<unsigned char> pwBytes(password.begin(), password.end());
+        auto clientHash = Crypto::sha256(pwBytes);
+        session.Kc = Crypto::sha256(clientHash);
+
+        // Lay ticket
+        if (!getTicketFromAS(username, session)) {
+            Utils::log(Utils::LogLevel::ERR, "Client", "AS failed");
+            system("pause"); return 1;
+        }
+        if (!getServiceTicket(username, session)) {
+            Utils::log(Utils::LogLevel::ERR, "Client", "TGS failed");
+            system("pause"); return 1;
+        }
+
+        // Doi ticket het han
+        Utils::log(Utils::LogLevel::WARN, "Client",
+            "Waiting 15 seconds for ticket to expire...");
+        Sleep(7000);
+
+        // Thu login voi ticket het han
+        Utils::log(Utils::LogLevel::WARN, "Client",
+            "Attempting login with EXPIRED ticket...");
+        if (!loginToServer(username, session, privKeyPEM)) {
+            Utils::log(Utils::LogLevel::INFO, "Client",
+                "=== EXPIRED TICKET TEST PASSED - login rejected ===");
+        }
+        else {
+            Utils::log(Utils::LogLevel::ERR, "Client",
+                "EXPIRED TICKET NOT REJECTED - SECURITY ISSUE!");
+        }
+        system("pause");
+        return 0;
     }
 
     Utils::log(Utils::LogLevel::INFO, "Client", "All done!");

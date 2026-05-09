@@ -12,6 +12,7 @@
 #include <mutex>
 #include <set>
 
+
 // ─── Account DB ───────────────────────────────────────────────
 struct Account {
     std::string username;
@@ -27,6 +28,53 @@ static std::mutex g_nonceMutex;
 // ─── Online clients: username -> SSL* (relay message) ─────────
 static std::map<std::string, SSL*> g_onlineClients;
 static std::mutex g_onlineMutex;
+
+// ─── Load/Save DB ─────────
+static const std::string CHAT_DB_FILE = "C:\\SecureChatCerts\\chat_db.json";
+
+void saveChatDB() {
+    std::lock_guard<std::mutex> lock(g_accountMutex);
+    json j;
+    json accounts = json::array();
+    for (auto& [username, acc] : g_accounts) {
+        json entry;
+        entry["username"] = acc.username;
+        entry["cert"] = acc.certPEM;
+        entry["public_key"] = acc.pubKeyPEM;
+        accounts.push_back(entry);
+    }
+    j["accounts"] = accounts;
+
+    std::ofstream f(CHAT_DB_FILE);
+    f << j.dump(2);
+    Utils::log(Utils::LogLevel::INFO, "ChatServer", "DB saved");
+}
+
+void loadChatDB() {
+    std::ifstream f(CHAT_DB_FILE);
+    if (!f.is_open()) {
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "No DB file, starting fresh");
+        return;
+    }
+
+    try {
+        json j = json::parse(f);
+        std::lock_guard<std::mutex> lock(g_accountMutex);
+        for (auto& entry : j["accounts"]) {
+            Account acc;
+            acc.username = entry["username"];
+            acc.certPEM = entry["cert"];
+            acc.pubKeyPEM = entry["public_key"];
+            g_accounts[acc.username] = acc;
+        }
+        Utils::log(Utils::LogLevel::INFO, "ChatServer",
+            "DB loaded: " + std::to_string(g_accounts.size()) + " accounts");
+    }
+    catch (std::exception& e) {
+        Utils::log(Utils::LogLevel::ERR, "ChatServer",
+            "Failed to load DB: " + std::string(e.what()));
+    }
+}
 
 // ─── Verify cert với CA (online) ──────────────────────────────
 bool verifyCertWithCA(const std::string& certPEM, int& outSerial) {
@@ -245,16 +293,22 @@ void handleChat(SSL* ssl, const std::string& username,
                 }
             }
 
-            // A gui KEY_EXCHANGE den B (relay)
+            // A gửi KEY_EXCHANGE đến B (relay)
             else if (req.type == MessageType::KEY_EXCHANGE) {
                 std::string targetUser = req.payload["target"];
+                std::string encData = req.payload["data"];
+
                 Utils::log(Utils::LogLevel::INFO, "ChatServer",
-                    "Relaying KEY_EXCHANGE from " + username + " to " + targetUser);
+                    "KEY_EXCHANGE from [" + username + "] to [" + targetUser + "]");
+                Utils::log(Utils::LogLevel::INFO, "ChatServer",
+                    "K_AB is RSA-encrypted - server cannot read it: " + encData.substr(0, 32) + "...");
 
                 std::lock_guard<std::mutex> lock(g_onlineMutex);
                 if (g_onlineClients.count(targetUser)) {
                     req.payload["from"] = username;
                     Protocol::sendMessage(g_onlineClients[targetUser], req);
+                    Utils::log(Utils::LogLevel::INFO, "ChatServer",
+                        "KEY_EXCHANGE relayed to " + targetUser);
                 }
                 else {
                     Message err; err.type = MessageType::ERROR_MSG;
@@ -263,7 +317,7 @@ void handleChat(SSL* ssl, const std::string& username,
                 }
             }
 
-            // B gui KEY_ACK ve A (relay)
+            // B gửi KEY_ACK về A (relay)
             else if (req.type == MessageType::KEY_ACK) {
                 std::string targetUser = req.payload["target"];
                 Utils::log(Utils::LogLevel::INFO, "ChatServer",
@@ -279,18 +333,26 @@ void handleChat(SSL* ssl, const std::string& username,
             // Chat message (relay, server khong doc duoc)
             else if (req.type == MessageType::CHAT_MESSAGE) {
                 std::string targetUser = req.payload["target"];
+                std::string encData = req.payload["data"]; // ciphertext, server khong doc duoc
+
                 Utils::log(Utils::LogLevel::INFO, "ChatServer",
-                    "Relaying message from " + username + " to " + targetUser);
+                    "Relaying message from [" + username + "] to [" + targetUser + "]");
+                Utils::log(Utils::LogLevel::INFO, "ChatServer",
+                    "Encrypted payload (server cannot read): " + encData.substr(0, 32) + "...");
 
                 std::lock_guard<std::mutex> lock(g_onlineMutex);
                 if (g_onlineClients.count(targetUser)) {
                     req.payload["from"] = username;
                     Protocol::sendMessage(g_onlineClients[targetUser], req);
+                    Utils::log(Utils::LogLevel::INFO, "ChatServer",
+                        "Message relayed successfully");
                 }
                 else {
                     Message err; err.type = MessageType::ERROR_MSG;
                     err.payload["reason"] = targetUser + " is not online";
                     Protocol::sendMessage(ssl, err);
+                    Utils::log(Utils::LogLevel::WARN, "ChatServer",
+                        targetUser + " is not online");
                 }
             }
 
@@ -359,11 +421,37 @@ void handleClient(SSL* ssl) {
             std::string sigB64 = popResp.payload["signature"];
             std::string clientNonce = popResp.payload["nonce"];
 
-            if (clientNonce != nonceB64) goto cleanup;
+			// --- Thêm nonce check để chống replay attack ---
+			// So sánh nonce nhận được với nonce đã gửi
+            if (clientNonce != nonceB64) {
+                Utils::log(Utils::LogLevel::WARN, "ChatServer", "Nonce mismatch: Challenge failed");
+                Message err; err.type = MessageType::ERROR_MSG;
+                err.payload["reason"] = "Nonce mismatch";
+                Protocol::sendMessage(ssl, err);
+                goto cleanup;
+            }
+
             {
                 std::lock_guard<std::mutex> lock(g_nonceMutex);
-                if (g_usedNonces.count(nonceB64)) goto cleanup;
+
+                // Safely get up to 16 characters for logging
+                std::string safeNonceLog = nonceB64.substr(0, std::min<size_t>(16, nonceB64.length()));
+
+                if (g_usedNonces.count(nonceB64)) {
+                    Utils::log(Utils::LogLevel::WARN, "ChatServer",
+                        "REPLAY ATTACK DETECTED - nonce already used: " + safeNonceLog + "...");
+                    Utils::log(Utils::LogLevel::WARN, "ChatServer",
+                        "Request from potential attacker blocked");
+
+                    Message err; err.type = MessageType::ERROR_MSG;
+                    err.payload["reason"] = "Replay attack detected";
+                    Protocol::sendMessage(ssl, err);
+                    goto cleanup;
+                }
+
                 g_usedNonces.insert(nonceB64);
+                Utils::log(Utils::LogLevel::INFO, "ChatServer",
+                    "Nonce accepted and recorded: " + safeNonceLog + "...");
             }
 
             std::string pubKeyPEM = extractPublicKey(certPEM);
@@ -376,6 +464,7 @@ void handleClient(SSL* ssl) {
                 goto cleanup;
             }
 
+            // --- THE FIX IS HERE ---
             {
                 std::lock_guard<std::mutex> lock(g_accountMutex);
                 Account acc;
@@ -384,6 +473,10 @@ void handleClient(SSL* ssl) {
                 acc.pubKeyPEM = pubKeyPEM;
                 g_accounts[username] = acc;
             }
+            // Gọi saveChatDB() NGOÀI block của lock để tránh deadlock!
+            saveChatDB();
+            // -----------------------
+
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
                 "Account created for: " + username);
 
@@ -392,6 +485,7 @@ void handleClient(SSL* ssl) {
             success.payload["message"] = "Account registered successfully";
             Protocol::sendMessage(ssl, success);
         }
+
         else if (req.type == MessageType::CLIENT_AUTH) {
             // Route sang login handler
             // Re-inject message vao handleLogin
@@ -490,6 +584,8 @@ int main() {
 
     // Kv phai giong voi KDC
     g_Kv = Crypto::sha256({ 'K','v','_','S','e','c','r','e','t','_','C','h','a','t' });
+
+    loadChatDB();
 
     SSL_CTX* ctx = Network::createServerContext(
         "C:\\SecureChatCerts\\chatserver.crt",

@@ -20,6 +20,57 @@ static std::map<int, std::string> g_certDB;   // serial → username
 static std::map<int, bool>        g_revokedDB; // serial → revoked
 static std::mutex g_dbMutex;
 
+// ─── File paths ───────────────────────────────────────────────
+static const std::string DB_FILE = "C:\\SecureChatCerts\\ca_db.json";
+
+// ─── Luu DB ra file ───────────────────────────────────────────
+void saveDB() {
+    std::lock_guard<std::mutex> lock(g_dbMutex);
+    json j;
+    j["serial_counter"] = g_serialCounter;
+
+    json certs = json::array();
+    for (auto& [serial, username] : g_certDB) {
+        json entry;
+        entry["serial"] = serial;
+        entry["username"] = username;
+        entry["revoked"] = g_revokedDB[serial];
+        certs.push_back(entry);
+    }
+    j["certs"] = certs;
+
+    std::ofstream f(DB_FILE);
+    f << j.dump(2);
+    Utils::log(Utils::LogLevel::INFO, "CA", "DB saved to " + DB_FILE);
+}
+
+// ─── Load DB tu file ──────────────────────────────────────────
+void loadDB() {
+    std::ifstream f(DB_FILE);
+    if (!f.is_open()) {
+        Utils::log(Utils::LogLevel::INFO, "CA", "No DB file found, starting fresh");
+        return;
+    }
+
+    try {
+        json j = json::parse(f);
+        std::lock_guard<std::mutex> lock(g_dbMutex);
+
+        g_serialCounter = j["serial_counter"];
+        for (auto& entry : j["certs"]) {
+            int serial = entry["serial"];
+            g_certDB[serial] = entry["username"];
+            g_revokedDB[serial] = entry["revoked"];
+        }
+        Utils::log(Utils::LogLevel::INFO, "CA",
+            "DB loaded: " + std::to_string(g_certDB.size()) + " certs");
+    }
+    catch (std::exception& e) {
+        Utils::log(Utils::LogLevel::ERR, "CA",
+            "Failed to load DB: " + std::string(e.what()));
+    }
+}
+
 // ─── Load CA cert + key từ file ───────────────────────────────
 bool loadCA(const std::string& certPath, const std::string& keyPath) {
     // Load cert
@@ -81,9 +132,13 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
     // Tạo cert mới
     X509* cert = X509_new();
 
-    // Serial number
-    std::lock_guard<std::mutex> lock(g_dbMutex);
-    int serial = g_serialCounter++;
+    // --- LOCK 1: Lấy serial number an toàn ---
+    int serial;
+    {
+        std::lock_guard<std::mutex> lock(g_dbMutex);
+        serial = g_serialCounter++;
+    }
+
     ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
 
     // Validity: 365 ngày
@@ -112,9 +167,15 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
     std::string certPEM(optr->data, optr->length);
     BIO_free(out);
 
-    // Lưu vào DB
-    g_certDB[serial] = username;
-    g_revokedDB[serial] = false;
+    // --- LOCK 2: Cập nhật CSDL trong RAM ---
+    {
+        std::lock_guard<std::mutex> lock(g_dbMutex);
+        g_certDB[serial] = username;
+        g_revokedDB[serial] = false;
+    }
+
+    // --- Ghi ra file mà KHÔNG giữ lock của hàm này (vì saveDB đã tự lock) ---
+    saveDB();
 
     Utils::log(Utils::LogLevel::INFO, "CA",
         "Issued cert for [" + username + "] serial=" + std::to_string(serial));
@@ -127,6 +188,7 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
     return certPEM;
 }
 
+// ─── Xử lý 1 client (chạy trong thread) ──────────────────────
 // ─── Xử lý 1 client (chạy trong thread) ──────────────────────
 void handleClient(SSL* ssl) {
     try {
@@ -153,13 +215,19 @@ void handleClient(SSL* ssl) {
             }
             Protocol::sendMessage(ssl, resp);
         }
+
         else if (req.type == MessageType::VERIFY_CERT) {
             int serial = req.payload["serial"];
-            std::lock_guard<std::mutex> lock(g_dbMutex);
             std::string status = "UNKNOWN";
-            if (g_certDB.count(serial)) {
-                status = g_revokedDB[serial] ? "REVOKED" : "VALID";
+
+            // Lock chỉ để đọc trạng thái
+            {
+                std::lock_guard<std::mutex> lock(g_dbMutex);
+                if (g_certDB.count(serial)) {
+                    status = g_revokedDB[serial] ? "REVOKED" : "VALID";
+                }
             }
+
             Utils::log(Utils::LogLevel::INFO, "CA",
                 "VERIFY_CERT serial=" + std::to_string(serial) + " → " + status);
 
@@ -168,6 +236,44 @@ void handleClient(SSL* ssl) {
             resp.payload["serial"] = serial;
             resp.payload["status"] = status;
             Protocol::sendMessage(ssl, resp);
+        }
+
+        else if (req.type == MessageType::REVOKE_CERT) {
+            int serial = req.payload["serial"];
+            bool found = false;
+            std::string revokedUser;
+
+            // --- LOCK 1: Cập nhật trạng thái revoke trong RAM ---
+            {
+                std::lock_guard<std::mutex> lock(g_dbMutex);
+                if (g_certDB.count(serial)) {
+                    g_revokedDB[serial] = true;
+                    found = true;
+                    revokedUser = g_certDB[serial];
+                }
+            }
+
+            // --- Xử lý việc lưu và gửi tin nhắn ở NGOÀI lock ---
+            if (found) {
+                saveDB(); // Persist an toàn (không bị deadlock)
+                Utils::log(Utils::LogLevel::WARN, "CA",
+                    "Cert REVOKED: serial=" + std::to_string(serial) +
+                    " username=" + revokedUser);
+
+                Message resp;
+                resp.type = MessageType::REVOKE_SUCCESS;
+                resp.payload["serial"] = serial;
+                resp.payload["username"] = revokedUser;
+                resp.payload["status"] = "REVOKED";
+                Protocol::sendMessage(ssl, resp);
+            }
+            else {
+                Utils::log(Utils::LogLevel::WARN, "CA",
+                    "Revoke failed - serial not found: " + std::to_string(serial));
+                Message err; err.type = MessageType::ERROR_MSG;
+                err.payload["reason"] = "Serial not found";
+                Protocol::sendMessage(ssl, err);
+            }
         }
     }
     catch (std::exception& e) {
@@ -186,6 +292,8 @@ int main() {
         Utils::log(Utils::LogLevel::ERR, "CA", "Failed to load CA. Exiting.");
         return 1;
     }
+
+    loadDB();
 
     SSL_CTX* ctx = Network::createServerContext(
         "C:\\SecureChatCerts\\ca.crt",

@@ -11,5 +11,6 @@
 #include "framework.h"
 #include <thread>
 #include <windows.h>
+#include <fstream>
 
 #endif //PCH_H

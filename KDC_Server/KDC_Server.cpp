@@ -12,6 +12,9 @@
 #include <mutex>
 #include <set>
 
+// ─── Global state ─────────────────────────────────────────────
+static int64_t g_ticketLifetime = 3600; // 3600 giây = 1 giờ
+
 // ─── Principal DB ─────────────────────────────────────────────
 struct Principal {
     std::string username;
@@ -33,6 +36,53 @@ static std::mutex g_principalMutex;
 static std::mutex g_sessionMutex;
 static std::set<std::string> g_usedNonces;
 static std::mutex g_nonceMutex;
+
+
+static const std::string KDC_DB_FILE = "C:\\SecureChatCerts\\kdc_db.json";
+
+void saveKDCDB() {
+    std::lock_guard<std::mutex> lock(g_principalMutex);
+    json j;
+    json principals = json::array();
+    for (auto& [username, p] : g_principals) {
+        json entry;
+        entry["username"] = p.username;
+        entry["Kc"] = Utils::base64Encode(p.Kc);
+        entry["public_key"] = p.pubKeyPEM;
+        principals.push_back(entry);
+    }
+    j["principals"] = principals;
+
+    std::ofstream f(KDC_DB_FILE);
+    f << j.dump(2);
+    Utils::log(Utils::LogLevel::INFO, "KDC", "DB saved");
+}
+
+void loadKDCDB() {
+    std::ifstream f(KDC_DB_FILE);
+    if (!f.is_open()) {
+        Utils::log(Utils::LogLevel::INFO, "KDC", "No DB file, starting fresh");
+        return;
+    }
+
+    try {
+        json j = json::parse(f);
+        std::lock_guard<std::mutex> lock(g_principalMutex);
+        for (auto& entry : j["principals"]) {
+            Principal p;
+            p.username = entry["username"];
+            p.Kc = Utils::base64Decode(entry["Kc"]);
+            p.pubKeyPEM = entry["public_key"];
+            g_principals[p.username] = p;
+        }
+        Utils::log(Utils::LogLevel::INFO, "KDC",
+            "DB loaded: " + std::to_string(g_principals.size()) + " principals");
+    }
+    catch (std::exception& e) {
+        Utils::log(Utils::LogLevel::ERR, "KDC",
+            "Failed to load DB: " + std::string(e.what()));
+    }
+}
 
 // ─── KDC master key (Ktgs) ────────────────────────────────────
 // Dùng để mã hóa Ticket_tgs
@@ -137,16 +187,35 @@ void handleRegister(SSL* ssl) {
 
     // Bước 5: Verify nonce + replay
     if (clientNonce != nonceB64) {
-        Utils::log(Utils::LogLevel::WARN, "KDC", "Nonce mismatch");
+        Utils::log(Utils::LogLevel::WARN, "KDC", "Nonce mismatch: Challenge failed");
+
+        Message err; err.type = MessageType::ERROR_MSG;
+        err.payload["reason"] = "Nonce mismatch";
+        Protocol::sendMessage(ssl, err);
         return;
     }
+
     {
         std::lock_guard<std::mutex> lock(g_nonceMutex);
+
+        // Safely get up to 16 characters for logging
+        std::string safeNonceLog = nonceB64.substr(0, std::min<size_t>(16, nonceB64.length()));
+
         if (g_usedNonces.count(nonceB64)) {
-            Utils::log(Utils::LogLevel::WARN, "KDC", "Replay detected");
+            Utils::log(Utils::LogLevel::WARN, "KDC",
+                "REPLAY ATTACK DETECTED - nonce already used: " + safeNonceLog + "...");
+            Utils::log(Utils::LogLevel::WARN, "KDC",
+                "Request from potential attacker blocked");
+
+            Message err; err.type = MessageType::ERROR_MSG;
+            err.payload["reason"] = "Replay attack detected";
+            Protocol::sendMessage(ssl, err);
             return;
         }
+
         g_usedNonces.insert(nonceB64);
+        Utils::log(Utils::LogLevel::INFO, "KDC",
+            "Nonce accepted and recorded: " + safeNonceLog + "...");
     }
 
     // Bước 6: Verify signature
@@ -361,6 +430,7 @@ void handleTGS(SSL* ssl) {
 }
 
 // ─── Router: phân biệt loại request ──────────────────────────
+// ─── Router: phân biệt loại request ──────────────────────────
 void handleClient(SSL* ssl) {
     try {
         // Peek message type để route đúng handler
@@ -417,6 +487,7 @@ void handleClient(SSL* ssl) {
             auto clientHashBytes = Utils::base64Decode(clientHashB64);
             auto Kc = Crypto::sha256(clientHashBytes);
 
+            // --- THE FIX IS HERE ---
             {
                 std::lock_guard<std::mutex> lock(g_principalMutex);
                 Principal p;
@@ -425,6 +496,10 @@ void handleClient(SSL* ssl) {
                 p.pubKeyPEM = pubKeyPEM;
                 g_principals[username] = p;
             }
+            // Gọi saveKDCDB() NGOÀI block của lock để tránh deadlock!
+            saveKDCDB();
+            // -----------------------
+
             Utils::log(Utils::LogLevel::INFO, "KDC",
                 "Principal created for: " + username);
 
@@ -461,7 +536,7 @@ void handleClient(SSL* ssl) {
             auto Kc_tgs = Crypto::generateNonce(32);
             auto iv_tgt = Crypto::generateNonce(16);
             int64_t ts2 = Utils::getTimestamp();
-            int64_t lifetime = 3600;
+            int64_t lifetime = g_ticketLifetime;
 
             json ticketPayload;
             ticketPayload["Kc_tgs"] = Utils::base64Encode(Kc_tgs);
@@ -539,7 +614,7 @@ void handleClient(SSL* ssl) {
             tvPayload["Kc_v"] = Utils::base64Encode(Kc_v);
             tvPayload["username"] = username;
             tvPayload["timestamp"] = ts4;
-            tvPayload["lifetime"] = (int64_t)3600;
+            tvPayload["lifetime"] = g_ticketLifetime;
             std::string tvStr = tvPayload.dump();
             std::vector<unsigned char> tvBytes(tvStr.begin(), tvStr.end());
             auto ticket_v_enc = Crypto::aesEncrypt(g_Kv, iv_tv, tvBytes);
@@ -576,11 +651,23 @@ void handleClient(SSL* ssl) {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
+	// ======================== TEST MODE ========================
+    // Cho phep override lifetime qua command line
+    g_ticketLifetime = 5; // <-- Change this number to whatever you want to test
+
+    Utils::log(Utils::LogLevel::WARN, "KDC",
+        "TEST MODE - ticket lifetime HARDCODED to " +
+        std::to_string(g_ticketLifetime) + " seconds");
+    // ======================== TEST MODE ========================
+
     Utils::log(Utils::LogLevel::INFO, "KDC", "Starting KDC Server on port 5003...");
 
     // Sinh Ktgs và Kv cố định (trong thực tế load từ file bảo mật)
     g_Ktgs = Crypto::sha256({ 'K','t','g','s','_','S','e','c','r','e','t' });
     g_Kv = Crypto::sha256({ 'K','v','_','S','e','c','r','e','t','_','C','h','a','t' });
+
+	// Load DB từ file
+    loadKDCDB();
 
     SSL_CTX* ctx = Network::createServerContext(
         "C:\\SecureChatCerts\\kdc.crt",
