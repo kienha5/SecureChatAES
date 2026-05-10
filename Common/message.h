@@ -18,6 +18,7 @@ enum class MessageType {
     ERROR_MSG,
     REVOKE_CERT,    // Admin -> CA: thu hồi cert
     REVOKE_SUCCESS, // CA -> Admin: xác nhận thu hồi
+    GET_CA_CERT,      // Server -> CA: xin CA cert
 
     // Kerberos flow
     KDC_REGISTER_INIT,    // Client → KDC: đăng ký principal

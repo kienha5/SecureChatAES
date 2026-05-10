@@ -30,7 +30,7 @@ static std::map<std::string, SSL*> g_onlineClients;
 static std::mutex g_onlineMutex;
 
 // ─── Load/Save DB ─────────
-static const std::string CHAT_DB_FILE = "C:\\SecureChatCerts\\chat_db.json";
+static const std::string CHAT_DB_FILE = Config::CHAT_DB();
 
 void saveChatDB() {
     std::lock_guard<std::mutex> lock(g_accountMutex);
@@ -88,10 +88,10 @@ bool verifyCertWithCA(const std::string& certPEM, int& outSerial) {
     X509_free(cert);
 
     // Kết nối CA hỏi trạng thái
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5000);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CA);
     if (!ssl) { Network::freeContext(ctx); return false; }
 
     Message req;
@@ -577,23 +577,86 @@ void handleClient(SSL* ssl) {
     Network::closeConnection(ssl, sock);
 }
 
+bool initChatServer() {
+    Config::ensureCertDir();
+
+    // Thu load neu da co san
+    std::string certPEM = Utils::loadPEM(Config::CHAT_CERT());
+    std::string keyPEM = Utils::loadPEM(Config::CHAT_KEY());
+
+    if (certPEM.empty() || keyPEM.empty()) {
+        // Download CA cert neu chua co
+        std::string caCertPEM = Utils::loadPEM(Config::CA_CERT());
+        if (caCertPEM.empty()) {
+            Utils::log(Utils::LogLevel::INFO, "ChatServer", "Downloading CA cert...");
+            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+            SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CA);
+            if (!ssl) {
+                Utils::log(Utils::LogLevel::ERR, "ChatServer", "Cannot connect to CA - start CA first!");
+                SSL_CTX_free(ctx);
+                return false;
+            }
+            Message req; req.type = MessageType::GET_CA_CERT;
+            Protocol::sendMessage(ssl, req);
+            Message resp = Protocol::recvMessage(ssl);
+            if (resp.type == MessageType::CERT_RESPONSE) {
+                caCertPEM = resp.payload["cert"];
+                Utils::savePEM(Config::CA_CERT(), caCertPEM);
+                Utils::log(Utils::LogLevel::INFO, "ChatServer", "CA cert downloaded");
+            }
+            int s = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, s);
+            SSL_CTX_free(ctx);
+        }
+
+        // Xin CA ky cert cho Chat Server
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Requesting cert from CA...");
+        bool ok = Crypto::requestCertFromCA(
+            "SecureChat-ChatServer", 365,
+            "127.0.0.1", Config::PORT_CA,
+            caCertPEM,
+            certPEM, keyPEM
+        );
+        if (!ok) {
+            Utils::log(Utils::LogLevel::ERR, "ChatServer", "Failed to get cert from CA");
+            return false;
+        }
+
+        Utils::savePEM(Config::CHAT_CERT(), certPEM);
+        Utils::savePEM(Config::CHAT_KEY(), keyPEM);
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Chat Server cert saved");
+    }
+    else {
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Loaded existing Chat Server cert");
+    }
+
+    // Giu nguyen phan sinh Kv
+    std::vector<unsigned char> kvBytes(
+        Config::KV_SECRET().begin(), Config::KV_SECRET().end());
+    g_Kv = Crypto::sha256(kvBytes);
+
+    loadChatDB();
+    Utils::log(Utils::LogLevel::INFO, "ChatServer", "Chat Server ready");
+    return true;
+}
+
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
-        "Starting Chat Server on port 5002...");
+        "Starting Chat Server on port " +
+        std::to_string(Config::PORT_CHAT) + "...");
 
-    // Kv phai giong voi KDC
-    g_Kv = Crypto::sha256({ 'K','v','_','S','e','c','r','e','t','_','C','h','a','t' });
-
-    loadChatDB();
+    if (!initChatServer()) {
+        Utils::log(Utils::LogLevel::ERR, "ChatServer", "Init failed");
+        return 1;
+    }
 
     SSL_CTX* ctx = Network::createServerContext(
-        "C:\\SecureChatCerts\\chatserver.crt",
-        "C:\\SecureChatCerts\\chatserver.key"
-    );
+        Config::CHAT_CERT(), Config::CHAT_KEY());
     if (!ctx) return 1;
 
-    int serverSock = Network::createServerSocket(5002);
+    int serverSock = Network::createServerSocket(Config::PORT_CHAT);
     if (serverSock < 0) return 1;
 
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
@@ -603,7 +666,6 @@ int main() {
         int clientSock = 0;
         SSL* ssl = Network::acceptClient(ctx, serverSock, clientSock);
         if (!ssl) continue;
-
         std::thread t(handleClient, ssl);
         t.detach();
     }

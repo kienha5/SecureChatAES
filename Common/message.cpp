@@ -3,6 +3,7 @@
 #include "../Common/utils.h"
 #include <openssl/ssl.h>
 #include <stdexcept>
+#include <winsock2.h>
 
 namespace Protocol {
 
@@ -17,6 +18,7 @@ namespace Protocol {
         case MessageType::CERT_STATUS:   return "CERT_STATUS";
         case MessageType::SUCCESS:       return "SUCCESS";
         case MessageType::ERROR_MSG:     return "ERROR_MSG";
+        case MessageType::GET_CA_CERT: return "GET_CA_CERT";
 
         case MessageType::REVOKE_CERT:    return "REVOKE_CERT";
         case MessageType::REVOKE_SUCCESS: return "REVOKE_SUCCESS";
@@ -50,6 +52,7 @@ namespace Protocol {
         if (s == "CERT_STATUS")    return MessageType::CERT_STATUS;
         if (s == "SUCCESS")        return MessageType::SUCCESS;
         if (s == "ERROR_MSG")      return MessageType::ERROR_MSG;
+        if (s == "GET_CA_CERT") return MessageType::GET_CA_CERT;
 
         if (s == "REVOKE_CERT")    return MessageType::REVOKE_CERT;
         if (s == "REVOKE_SUCCESS") return MessageType::REVOKE_SUCCESS;

@@ -1,10 +1,8 @@
 #include "pch.h"
 #include "../Common/network.h"
 #include "../Common/utils.h"
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <WinSock2.h>
-#include <WS2tcpip.h>
+#include <openssl/crypto.h>
+#include <vector>
 
 namespace Network {
 
@@ -153,5 +151,30 @@ namespace Network {
 
     void freeContext(SSL_CTX* ctx) {
         if (ctx) SSL_CTX_free(ctx);
+    }
+
+    // OpenSSL thread safety callbacks
+    static std::vector<std::unique_ptr<std::mutex>> g_sslLocks;
+
+    static void sslLockCallback(int mode, int n, const char*, int) {
+        // Dùng toán tử -> vì bây giờ nó là con trỏ
+        if (mode & CRYPTO_LOCK)
+            g_sslLocks[n]->lock();
+        else
+            g_sslLocks[n]->unlock();
+    }
+
+    void initOpenSSLThreading() {
+        int numLocks = CRYPTO_num_locks();
+
+        // Cấp phát kích thước mảng con trỏ
+        g_sslLocks.resize(numLocks);
+
+        // Khởi tạo từng mutex mới và gán vào con trỏ
+        for (int i = 0; i < numLocks; ++i) {
+            g_sslLocks[i] = std::make_unique<std::mutex>();
+        }
+
+        CRYPTO_set_locking_callback(sslLockCallback);
     }
 }

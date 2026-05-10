@@ -13,4 +13,7 @@
 #include <windows.h>
 #include <fstream>
 
+// Them vao pch.h
+#include "../Common/config.h"
+
 #endif //PCH_H

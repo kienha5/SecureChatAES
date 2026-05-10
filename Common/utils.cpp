@@ -83,4 +83,19 @@ namespace Utils {
             << message << "\n";
     }
 
+    std::string Utils::loadPEM(const std::string& path) {
+        std::ifstream f(path);
+        if (!f.is_open()) return "";
+        return std::string(
+            std::istreambuf_iterator<char>(f),
+            std::istreambuf_iterator<char>()
+        );
+    }
+
+    bool Utils::savePEM(const std::string& path, const std::string& content) {
+        std::ofstream f(path);
+        if (!f.is_open()) return false;
+        f << content;
+        return true;
+    }
 }
