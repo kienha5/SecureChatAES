@@ -110,20 +110,27 @@ inline void resetChatSession() {
     g_app.K_AB.clear();
     memset(g_app.targetUser, 0, sizeof(g_app.targetUser));
 
-    // Wake up send loop đang bị block
     g_app.inputQueueCV.notify_all();
+    g_app.chatMsgQueueCV.notify_all();
 
-    // Xóa tin nhắn cũ
     {
         std::lock_guard<std::mutex> lock(g_app.msgMutex);
         g_app.messages.clear();
     }
-
-    // Xóa pending messages trong queue
     {
         std::lock_guard<std::mutex> lock(g_app.inputQueueMutex);
         while (!g_app.inputQueue.empty())
             g_app.inputQueue.pop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_app.chatMsgQueueMutex);
+        while (!g_app.chatMsgQueue.empty())
+            g_app.chatMsgQueue.pop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_app.handshakeQueueMutex);
+        while (!g_app.handshakeQueue.empty())
+            g_app.handshakeQueue.pop();
     }
 }
 

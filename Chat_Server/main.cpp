@@ -399,6 +399,20 @@ void handleChat(SSL* ssl, const std::string& username,
                 catch (...) {}
             }
 
+			// Client báo offline — relay đến peer nếu đang chat
+            else if (req.type == MessageType::ERROR_MSG) {
+                // Client báo kết thúc session — relay đến peer
+                std::string targetUser = req.payload.value("target", "");
+                std::string reason = req.payload.value("reason", "");
+                if (reason == "session_ended" && !targetUser.empty()) {
+                    std::lock_guard<std::mutex> lock(g_onlineMutex);
+                    if (g_onlineClients.count(targetUser)) {
+                        req.payload["from"] = username;
+                        Protocol::sendMessage(g_onlineClients[targetUser], req);
+                    }
+                }
+            }   
+
             else {
                 Utils::log(Utils::LogLevel::WARN, "ChatServer",
                     "Unknown message type in chat mode");
@@ -411,15 +425,15 @@ void handleChat(SSL* ssl, const std::string& username,
             username + " disconnected: " + e.what());
     }
 
-    // Xoa khoi online list
-    // Notify doi phuong neu dang chat
-    // Tim xem username nay dang chat voi ai
-    // bang cach broadcast USER_OFFLINE den tat ca online clients
+    // Xóa khỏi online list
+    // Notify đối phương nếu đang chat
+    // Tìm xem username này đang chat với ai
+    // bằng cách broadcast USER_OFFLINE đến tất cả online clients
     {
         std::lock_guard<std::mutex> lock(g_onlineMutex);
 
-        // Gui USER_OFFLINE den tat ca client con online
-        // Ho se tu biet minh co lien quan khong
+        // Gửi USER_OFFLINE đến tất cả client còn online
+        // Họ sẽ tự biết mình có liên quan không
         Message offlineMsg;
         offlineMsg.type = MessageType::USER_OFFLINE;
         offlineMsg.payload["user"] = username;
@@ -431,7 +445,7 @@ void handleChat(SSL* ssl, const std::string& username,
                     Protocol::sendMessage(onlineSSL, offlineMsg);
                 }
                 catch (...) {
-                    // Neu gui that bai thi bo qua
+                    // Nếu gửi thất bại thì bỏ qua
                 }
             }
         }
@@ -448,7 +462,7 @@ void handleClient(SSL* ssl) {
         Message req = Protocol::recvMessage(ssl);
 
         if (req.type == MessageType::REGISTER_CERT) {
-            // Đăng ky account - xu ly nhu cu
+            // Đăng ký account - xử lý như cũ
             std::string username = req.payload["username"];
             std::string certPEM = req.payload["cert"];
             int64_t     timestamp = req.payload["timestamp"];
@@ -529,7 +543,6 @@ void handleClient(SSL* ssl) {
                 goto cleanup;
             }
 
-            // --- THE FIX IS HERE ---
             {
                 std::lock_guard<std::mutex> lock(g_accountMutex);
                 Account acc;
@@ -538,7 +551,7 @@ void handleClient(SSL* ssl) {
                 acc.pubKeyPEM = pubKeyPEM;
                 g_accounts[username] = acc;
             }
-            // Gọi saveChatDB() NGOÀI block của lock để tránh deadlock!
+            // Gọi saveChatDB() NGOÀI block của lock để tránh deadlock
             saveChatDB();
             // -----------------------
 
@@ -553,8 +566,8 @@ void handleClient(SSL* ssl) {
 
         else if (req.type == MessageType::CLIENT_AUTH) {
             // Route sang login handler
-            // Re-inject message vao handleLogin
-            // Xu ly truc tiep o day de tranh mat message
+            // Re-inject message vào handleLogin
+            // Xử lý trực tiếp ở đây để tránh mất message
             std::string username = req.payload["username"];
             std::string ticket_v_b64 = req.payload["ticket_v"];
             std::string auth_b64 = req.payload["authenticator"];
@@ -594,6 +607,20 @@ void handleClient(SSL* ssl) {
                 err.payload["reason"] = "Authenticator expired";
                 Protocol::sendMessage(ssl, err);
                 goto cleanup;
+            }
+
+            // ── Check duplicate login ──────────────────────────────
+            {
+                std::lock_guard<std::mutex> lock(g_onlineMutex);
+                if (g_onlineClients.count(username)) {
+                    Utils::log(Utils::LogLevel::WARN, "ChatServer",
+                        "Duplicate login attempt for: " + username);
+                    Message err;
+                    err.type = MessageType::ERROR_MSG;
+                    err.payload["reason"] = "already_logged_in";
+                    Protocol::sendMessage(ssl, err);
+                    goto cleanup;
+                }
             }
 
             {

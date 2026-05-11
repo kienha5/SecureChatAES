@@ -211,72 +211,65 @@ static void renderLoginScreen() {
 static void renderChatScreen() {
     ImGuiIO& io = ImGui::GetIO();
 
-    // ── Online Users Panel (window rieng, goi TRUOC main window) ──
-    float panelW = 160.0f;
-    float panelH = 200.0f;
-    ImGui::SetNextWindowPos(
-        { io.DisplaySize.x - panelW - 10.0f, 35.0f },
-        ImGuiCond_Always);
-    ImGui::SetNextWindowSize({ panelW, panelH }, ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGui::Begin("##online", nullptr,
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.75f, 0.50f, 1.0f));
-    ImGui::Text("Online Users");
-    ImGui::PopStyleColor();
-    ImGui::Separator();
-
-    ImGui::BeginChild("##userlist", { 0, panelH - 45 }, false);
+    if (!g_app.chatReady)
     {
-        std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
-        if (g_app.onlineUsers.empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
-            ImGui::Text("No one else online");
-            ImGui::PopStyleColor();
-        }
-        else {
-            for (auto& user : g_app.onlineUsers) {
+        // ── Online Users Panel (window rieng, goi TRUOC main window) ──
+        float panelW = 160.0f;
+        float panelH = 200.0f;
+        ImGui::SetNextWindowPos(
+            { io.DisplaySize.x - panelW - 10.0f, 35.0f },
+            ImGuiCond_Always);
+        ImGui::SetNextWindowSize({ panelW, panelH }, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        ImGui::Begin("##online", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.75f, 0.50f, 1.0f));
+        ImGui::Text("Online Users");
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+
+        ImGui::BeginChild("##userlist", { 0, panelH - 45 }, false);
+        {
+            std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+            if (g_app.onlineUsers.empty()) {
                 ImGui::PushStyleColor(ImGuiCol_Text,
-                    ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-                ImGui::Text("●");
+                    ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
+                ImGui::Text("No one else online");
                 ImGui::PopStyleColor();
-                ImGui::SameLine();
-
-                bool isTarget = (std::string(g_app.targetUser) == user);
-                if (isTarget)
+            }
+            else {
+                for (auto& user : g_app.onlineUsers) {
                     ImGui::PushStyleColor(ImGuiCol_Text,
-                        ImVec4(0.25f, 0.75f, 0.95f, 1.0f));
+                        ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
+                    ImGui::Text("●");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine();
 
-                if (ImGui::Selectable(user.c_str(), isTarget, 0, { 0,0 }))
-                    snprintf(g_app.targetUser, sizeof(g_app.targetUser),
-                        "%s", user.c_str());
+                    bool isTarget = (std::string(g_app.targetUser) == user);
+                    if (isTarget)
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                            ImVec4(0.25f, 0.75f, 0.95f, 1.0f));
 
-                if (isTarget) ImGui::PopStyleColor();
+                    if (ImGui::Selectable(user.c_str(), isTarget, 0, { 0,0 }))
+                        snprintf(g_app.targetUser, sizeof(g_app.targetUser),
+                            "%s", user.c_str());
+
+                    if (isTarget) ImGui::PopStyleColor();
+                }
             }
         }
+        ImGui::EndChild();
+        ImGui::End(); // ket thuc ##online TRUOC khi bat dau ##main
     }
-    ImGui::EndChild();
-    ImGui::End(); // ket thuc ##online TRUOC khi bat dau ##main
 
     // ── Main window (goi SAU online panel) ────────────────────
     ImGui::SetNextWindowPos({ 0, 0 });
     ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::Begin("##main", nullptr,
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    ImGui::SetNextWindowPos({ 0, 0 });
-    ImGui::SetNextWindowSize(io.DisplaySize);
-
     ImGui::Begin("##main", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
@@ -293,19 +286,32 @@ static void renderChatScreen() {
     ImGui::Text("  [E2EE]  Logged in as: %s", g_app.myUsername.c_str());
     ImGui::PopStyleColor();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80);
+
     if (ImGui::SmallButton("Logout")) {
+        g_app.connected = false;
+        g_app.chatReady = false;
+
+        g_app.inputQueueCV.notify_all();
+        g_app.chatMsgQueueCV.notify_all();
+        g_app.handshakeQueueCV.notify_all();
+
         if (g_app.chatSSL) {
+            // SSL_shutdown gửi close_notify → unblock SSL_read trong startAutoWait
+            SSL_shutdown(g_app.chatSSL);
+            // Bây giờ mới an toàn để close
             int s = SSL_get_fd(g_app.chatSSL);
             Network::closeConnection(g_app.chatSSL, s);
             g_app.chatSSL = nullptr;
         }
-        g_app.connected = false;
-        g_app.chatReady = false;
+
+        // Reset UI
         g_app.screen = AppScreen::LOGIN;
         g_app.messages.clear();
         g_app.logs.clear();
+        g_app.onlineUsers.clear();
         memset(g_app.username, 0, sizeof(g_app.username));
         memset(g_app.password, 0, sizeof(g_app.password));
+        memset(g_app.targetUser, 0, sizeof(g_app.targetUser));
     }
 
     // Sau do moi den ImGui::Separator() cua main window
@@ -327,25 +333,61 @@ static void renderChatScreen() {
     if (!g_app.chatReady) {
         if (ImGui::Button("Start Chat")) {
             std::string target(g_app.targetUser);
-            if (!target.empty()) {
-                startNetworkThread(true); // asInitiator = true
+            if (target.empty()) {
+                addLog("Please enter a username", true);
+            }
+            else {
+                // Check online list
+                bool isOnline = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+                    isOnline = std::find(
+                        g_app.onlineUsers.begin(),
+                        g_app.onlineUsers.end(),
+                        target) != g_app.onlineUsers.end();
+                }
+
+                if (!isOnline) {
+                    addLog("User '" + target + "' is not online", true);
+                }
+                else {
+                    startNetworkThread(true);
+                }
             }
         }
-
-        // Hint text nếu chưa nhập target
         if (strlen(g_app.targetUser) == 0) {
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                ImVec4(0.55f, 0.55f, 0.55f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.55f, 0.55f, 1.0f));
             ImGui::Text("(select from online list or type username)");
             ImGui::PopStyleColor();
         }
     }
-
     else {
+        // chatReady == true
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
         ImGui::Text("E2EE Active");
         ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.20f, 0.20f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.25f, 0.25f, 1.0f));
+
+        if (ImGui::Button("End Chat")) {
+            // Gửi thông báo cho peer qua server
+            if (g_app.chatSSL && g_app.chatReady) {
+                Message endMsg;
+                endMsg.type = MessageType::ERROR_MSG;
+                endMsg.payload["reason"] = "session_ended";
+                endMsg.payload["target"] = std::string(g_app.targetUser);
+                try {
+                    Protocol::sendMessage(g_app.chatSSL, endMsg);
+                }
+                catch (...) {}
+            }
+            addMsg("System", "[Session ended by you.]", false);
+            resetChatSession();
+        }
+
+        ImGui::PopStyleColor(2);
     }
 
     ImGui::Separator();
@@ -399,26 +441,29 @@ static void renderChatScreen() {
     ImGui::Separator();
 
     // ── Input box ─────────────────────────────────────────────
-    bool sendMsg = false;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 70);
-    if (ImGui::InputText("##input", g_app.inputBuf, sizeof(g_app.inputBuf),
-        ImGuiInputTextFlags_EnterReturnsTrue)) {
-        sendMsg = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Send", { -1, 0 }) && g_app.chatReady) {
-        sendMsg = true;
-    }
+    if (g_app.chatReady)
+    {
+        bool sendMsg = false;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 70);
+        if (ImGui::InputText("##input", g_app.inputBuf, sizeof(g_app.inputBuf),
+            ImGuiInputTextFlags_EnterReturnsTrue)) {
+            sendMsg = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Send", { -1, 0 }) && g_app.chatReady) {
+            sendMsg = true;
+        }
 
-    if (sendMsg && g_app.chatReady && strlen(g_app.inputBuf) > 0) {
-        std::string text(g_app.inputBuf);
-        std::string target(g_app.targetUser);
-        memset(g_app.inputBuf, 0, sizeof(g_app.inputBuf));
+        if (sendMsg && g_app.chatReady && strlen(g_app.inputBuf) > 0) {
+            std::string text(g_app.inputBuf);
+            std::string target(g_app.targetUser);
+            memset(g_app.inputBuf, 0, sizeof(g_app.inputBuf));
 
-        // GUI không encrypt nữa — chỉ push plaintext
-        // network thread sẽ encrypt + send
-        pushInputQueue(target, text);
-        addMsg("Me", text, true);
+            // GUI không encrypt nữa — chỉ push plaintext
+            // network thread sẽ encrypt + send
+            pushInputQueue(target, text);
+            addMsg("Me", text, true);
+        }
     }
 
     ImGui::Separator();

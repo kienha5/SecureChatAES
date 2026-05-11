@@ -314,7 +314,7 @@ inline bool doLogin(const std::string& username,
     log("Logging in to Chat Server...", false);
     {
         SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
-        // [SỬA LỖI 3]: Dùng Config::PORT_CHAT thay vì gõ cứng 5002
+        // Dùng Config::PORT_CHAT thay vì gõ cứng 5002
         SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_CHAT);
         if (!ssl) {
             log("Cannot connect to Chat Server", true);
@@ -340,6 +340,22 @@ inline bool doLogin(const std::string& username,
         Protocol::sendMessage(ssl, req);
 
         Message resp = Protocol::recvMessage(ssl);
+
+		// Xử lý trường hợp lỗi trước khi kiểm tra loại message
+        if (resp.type == MessageType::ERROR_MSG) {
+            std::string reason = resp.payload.value("reason", "unknown");
+            if (reason == "already_logged_in") {
+                log("Account '" + username + "' is already logged in!", true);
+            }
+            else {
+                log("Login rejected: " + reason, true);
+            }
+            int s = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, s);
+            Network::freeContext(ctx);
+            return false;
+        }
+
         if (resp.type != MessageType::SERVER_AUTH) {
             log("Chat Server login failed", true);
             int s = SSL_get_fd(ssl);
