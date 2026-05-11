@@ -11,6 +11,20 @@
 #include "network_thread.h"
 #include <fstream>
 
+// Helper: doc tu handshake queue thay vi truc tiep tu SSL
+static Message recvHandshakeMsg(int timeoutMs = 10000) {
+    std::unique_lock<std::mutex> lock(g_app.handshakeQueueMutex);
+    bool ok = g_app.handshakeQueueCV.wait_for(
+        lock,
+        std::chrono::milliseconds(timeoutMs),
+        [] { return !g_app.handshakeQueue.empty(); }
+    );
+    if (!ok) throw std::runtime_error("Handshake timeout");
+    Message msg = g_app.handshakeQueue.front();
+    g_app.handshakeQueue.pop();
+    return msg;
+}
+
 // ─── E2EE handshake phía A (Start Session) ───────────────────
 static bool doHandshakeAsA(const std::string& me,
     const std::string& target)
@@ -23,9 +37,16 @@ static bool doHandshakeAsA(const std::string& me,
     req.payload["target"] = target;
     Protocol::sendMessage(g_app.chatSSL, req);
 
-    Message resp = Protocol::recvMessage(g_app.chatSSL);
+    Message resp = recvHandshakeMsg();
     if (resp.type != MessageType::SESSION_RESPONSE) {
-        logCb("Failed to get pubkey of " + target, true);
+        if (resp.type == MessageType::ERROR_MSG &&
+            resp.payload.contains("reason")) {
+            std::string reason = resp.payload["reason"];
+            addLog("Cannot chat with " + target + ": " + reason, true);
+        }
+        else {
+            addLog(target + " is not available", true);
+        }
         return false;
     }
 
@@ -51,7 +72,7 @@ static bool doHandshakeAsA(const std::string& me,
     Protocol::sendMessage(g_app.chatSSL, kexMsg);
     logCb("Sent K_AB to " + target, false);
 
-    Message ack = Protocol::recvMessage(g_app.chatSSL);
+    Message ack = recvHandshakeMsg();
     if (ack.type != MessageType::KEY_ACK) {
         logCb("Expected KEY_ACK", true);
         return false;
@@ -86,12 +107,11 @@ static bool doHandshakeAsA(const std::string& me,
 }
 
 // ─── E2EE handshake phía B (Wait Session) ────────────────────
-static bool doHandshakeAsB(const std::string& me)
+static bool doHandshakeAsB(const std::string& me, const Message& kexMsg)
 {
     auto logCb = [](const std::string& m, bool e) { addLog(m, e); };
     logCb("Waiting for incoming session...", false);
 
-    Message kexMsg = Protocol::recvMessage(g_app.chatSSL);
     if (kexMsg.type != MessageType::KEY_EXCHANGE) {
         logCb("Expected KEY_EXCHANGE, got: " +
             std::to_string((int)kexMsg.type), true);
@@ -230,6 +250,73 @@ static bool doHandshakeAsB(const std::string& me)
     return true;
 }
 
+static void dispatchChatLoop(const std::string& target) {
+    // Send loop: doc inputQueue, encrypt, gui
+    // Recv: dispatcher thread tu dong push vao chatMsgQueue
+    // Day thread xu ly chat msg tu queue
+
+    std::thread chatRecvThread([target]() {
+        while (g_app.connected && g_app.chatReady) {
+            Message msg;
+            {
+                std::unique_lock<std::mutex> lock(g_app.chatMsgQueueMutex);
+                g_app.chatMsgQueueCV.wait(lock, [] {
+                    return !g_app.chatMsgQueue.empty()
+                        || !g_app.chatReady
+                        || !g_app.connected;
+                    });
+                if (!g_app.chatReady || !g_app.connected) break;
+                msg = g_app.chatMsgQueue.front();
+                g_app.chatMsgQueue.pop();
+            }
+
+            auto enc = Utils::base64Decode(msg.payload["data"]);
+            auto iv = Utils::base64Decode(msg.payload["iv"]);
+            auto dec = Crypto::aesDecrypt(g_app.K_AB, iv, enc);
+            addMsg(msg.payload["from"],
+                std::string(dec.begin(), dec.end()), false);
+        }
+        });
+    chatRecvThread.detach();
+
+    // Send loop
+    while (g_app.connected && g_app.chatReady) {
+        AppState::PendingMsg pending;
+        {
+            std::unique_lock<std::mutex> lock(g_app.inputQueueMutex);
+            g_app.inputQueueCV.wait(lock, [] {
+                return !g_app.inputQueue.empty()
+                    || !g_app.connected
+                    || !g_app.chatReady;
+                });
+            if (!g_app.connected || !g_app.chatReady) break;
+            pending = g_app.inputQueue.front();
+            g_app.inputQueue.pop();
+        }
+
+        if (g_app.chatSSL && g_app.chatReady) {
+            try {
+                std::vector<unsigned char> msgBytes(
+                    pending.text.begin(), pending.text.end());
+                auto iv = Crypto::generateNonce(16);
+                auto enc = Crypto::aesEncrypt(g_app.K_AB, iv, msgBytes);
+
+                Message chatMsg;
+                chatMsg.type = MessageType::CHAT_MESSAGE;
+                chatMsg.payload["target"] = pending.target;
+                chatMsg.payload["data"] = Utils::base64Encode(enc);
+                chatMsg.payload["iv"] = Utils::base64Encode(iv);
+                Protocol::sendMessage(g_app.chatSSL, chatMsg);
+            }
+            catch (...) {
+                addLog("Send failed", true);
+                resetChatSession();
+                break;
+            }
+        }
+    }
+}
+
 // ─── Chat loop: send + recv tuần tự trên 1 thread ────────────
 static void chatLoop(const std::string& target)
 {
@@ -237,10 +324,12 @@ static void chatLoop(const std::string& target)
     // Lý do: recv là blocking, cần chạy song song với send
     // Nhưng đây là 2 operations khác nhau (read vs write)
     // OpenSSL hỗ trợ đồng thời 1 read + 1 write trên cùng SSL*
-    std::thread recvThread([]() {
-        while (g_app.connected) {
+    // Recv thread trong chatLoop
+    std::thread recvThread([target]() {
+        while (g_app.connected && g_app.chatReady) {
             try {
                 Message msg = Protocol::recvMessage(g_app.chatSSL);
+
                 if (msg.type == MessageType::CHAT_MESSAGE) {
                     auto enc = Utils::base64Decode(msg.payload["data"]);
                     auto iv = Utils::base64Decode(msg.payload["iv"]);
@@ -248,59 +337,111 @@ static void chatLoop(const std::string& target)
                     std::string text(dec.begin(), dec.end());
                     addMsg(msg.payload["from"], text, false);
                 }
+                else if (msg.type == MessageType::USER_OFFLINE) {
+                    std::string offlineUser = msg.payload["user"];
+                    removeOnlineUser(offlineUser); // cap nhat list
+
+                    if (offlineUser == target) {
+                        addMsg("System",
+                            "[" + offlineUser + " has disconnected. Session closed.]",
+                            false);
+                        addLog(offlineUser + " went offline", true);
+                        resetChatSession();
+                        break;
+                    }
+                    else {
+                        addLog(offlineUser + " went offline", false);
+                    }
+                }
+                else if (msg.type == MessageType::USER_ONLINE) {
+                    // Van co the nhan trong luc chat
+                    std::string user = msg.payload["user"];
+                    addOnlineUser(user);
+                    addLog(user + " is now online", false);
+                }
+                else if (msg.type == MessageType::ONLINE_USERS_LIST) {
+                    json users = msg.payload["users"];
+                    std::vector<std::string> list;
+                    for (auto& u : users) {
+                        std::string uStr = u.get<std::string>();
+                        if (uStr != g_app.myUsername)
+                            list.push_back(uStr);
+                    }
+                    setOnlineUsers(list);
+                }
             }
-            catch (...) { break; }
+            catch (...) {
+                addMsg("System", "[Connection lost. Session closed.]", false);
+                addLog("Connection lost", true);
+                resetChatSession();
+                break;
+            }
         }
         });
     recvThread.detach();
 
     // Send loop: chờ GUI push vào inputQueue rồi encrypt + send
     // Giống CLI's getline loop, nhưng thay stdin bằng inputQueue
-    while (g_app.connected) {
+    // Send loop
+    while (g_app.connected && g_app.chatReady) {
         AppState::PendingMsg pending;
         {
             std::unique_lock<std::mutex> lock(g_app.inputQueueMutex);
             g_app.inputQueueCV.wait(lock, [] {
-                return !g_app.inputQueue.empty() || !g_app.connected;
+                return !g_app.inputQueue.empty() ||
+                    !g_app.connected ||
+                    !g_app.chatReady;          
                 });
-            if (!g_app.connected && g_app.inputQueue.empty()) break;
+
+            if (!g_app.connected || !g_app.chatReady) break;
+
             pending = g_app.inputQueue.front();
             g_app.inputQueue.pop();
         }
 
-        // Encrypt + send — không cần lock SSL vì recvThread đang read
-        // send thread đang write — OpenSSL OK với 1 reader + 1 writer
-        std::vector<unsigned char> msgBytes(
-            pending.text.begin(), pending.text.end());
-        auto iv = Crypto::generateNonce(16);
-        auto enc = Crypto::aesEncrypt(g_app.K_AB, iv, msgBytes);
+        // Encrypt va gui
+        if (g_app.chatSSL && g_app.chatReady) {
+            try {
+                std::vector<unsigned char> msgBytes(
+                    pending.text.begin(), pending.text.end());
+                auto iv = Crypto::generateNonce(16);
+                auto enc = Crypto::aesEncrypt(g_app.K_AB, iv, msgBytes);
 
-        Message chatMsg;
-        chatMsg.type = MessageType::CHAT_MESSAGE;
-        chatMsg.payload["target"] = pending.target;
-        chatMsg.payload["data"] = Utils::base64Encode(enc);
-        chatMsg.payload["iv"] = Utils::base64Encode(iv);
-
-        try {
-            Protocol::sendMessage(g_app.chatSSL, chatMsg);
+                Message chatMsg;
+                chatMsg.type = MessageType::CHAT_MESSAGE;
+                chatMsg.payload["target"] = pending.target;
+                chatMsg.payload["data"] = Utils::base64Encode(enc);
+                chatMsg.payload["iv"] = Utils::base64Encode(iv);
+                Protocol::sendMessage(g_app.chatSSL, chatMsg);
+            }
+            catch (...) {
+                addLog("Send failed - connection lost", true);
+                resetChatSession();
+                break;
+            }
         }
-        catch (...) { break; }
     }
 }
 
 // ─── Entry point — gọi từ GUI khi bấm Start/Wait ─────────────
 void startNetworkThread(bool asInitiator)
 {
+    if (!asInitiator) return;
+
     std::string me = g_app.myUsername;
     std::string target = g_app.targetUser;
 
-    std::thread([me, target, asInitiator]() {
-        bool ok = false;
+    std::thread([me, target]() {
+        // Báo startAutoWait nhường SSL
+        g_app.isHandshaking = true;
 
-        if (asInitiator)
-            ok = doHandshakeAsA(me, target);
-        else
-            ok = doHandshakeAsB(me);
+        // Cho startAutoWait thoát khỏi recvMessage hiện tại
+        // recvMessage là blocking nên cần đợi nó timeout hoặc finish
+        // --> đợi 1 chút để nó xử lý xong message hiện tại
+        Sleep(100);
+
+        bool ok = doHandshakeAsA(me, target);
+        g_app.isHandshaking = false;
 
         if (!ok) {
             addLog("Handshake failed", true);
@@ -308,10 +449,113 @@ void startNetworkThread(bool asInitiator)
         }
 
         g_app.chatReady = true;
+		dispatchChatLoop(target);
 
-        // Lấy target thực (phía B cập nhật targetUser trong handshake)
-        std::string actualTarget = g_app.targetUser;
-        chatLoop(actualTarget);
+        resetChatSession();
+        addLog("Session ended. Ready for new session.", false);
+        }).detach();
+}
 
+void startAutoWait() {
+    std::thread([]() {
+        std::string me = g_app.myUsername;
+        addLog("Ready to receive chat sessions", false);
+
+        while (g_app.connected) {
+            try {
+                // Chi co thread nay doc SSL
+                Message msg = Protocol::recvMessage(g_app.chatSSL);
+
+                switch (msg.type) {
+
+                case MessageType::KEY_EXCHANGE: {
+                    // Incoming session tu nguoi khac
+                    std::string fromUser = msg.payload["from"];
+                    addLog("Incoming session from: " + fromUser, false);
+                    snprintf(g_app.targetUser, sizeof(g_app.targetUser),
+                        "%s", fromUser.c_str());
+
+                    bool ok = doHandshakeAsB(me, msg);
+                    if (!ok) {
+                        addLog("Handshake failed", true);
+                        resetChatSession();
+                        break;
+                    }
+
+                    g_app.chatReady = true;
+                    addLog("E2EE established with " + fromUser + "!", false);
+
+                    // chatLoop spawn recv thread — nhung recv thread do
+                    // se conflict voi dispatcher nay!
+                    // Nen khong dung chatLoop nua, xu ly recv truc tiep o day
+                    dispatchChatLoop(fromUser);
+
+                    resetChatSession();
+                    addLog("Session ended. Ready for new session.", false);
+                    break;
+                }
+
+                case MessageType::SESSION_RESPONSE:
+                case MessageType::KEY_ACK: {
+                    // Day vao handshake queue cho doHandshakeAsA doc
+                    std::lock_guard<std::mutex> lock(
+                        g_app.handshakeQueueMutex);
+                    g_app.handshakeQueue.push(msg);
+                    g_app.handshakeQueueCV.notify_one();
+                    break;
+                }
+
+                case MessageType::CHAT_MESSAGE: {
+                    // Day vao chat queue
+                    std::lock_guard<std::mutex> lock(
+                        g_app.chatMsgQueueMutex);
+                    g_app.chatMsgQueue.push(msg);
+                    g_app.chatMsgQueueCV.notify_one();
+                    break;
+                }
+
+                case MessageType::USER_ONLINE: {
+                    addOnlineUser(msg.payload["user"]);
+                    addLog(msg.payload["user"].get<std::string>()
+                        + " is now online", false);
+                    break;
+                }
+
+                case MessageType::USER_OFFLINE: {
+                    std::string user = msg.payload["user"];
+                    removeOnlineUser(user);
+                    if (g_app.chatReady &&
+                        std::string(g_app.targetUser) == user) {
+                        addMsg("System",
+                            "[" + user + " has disconnected. Session closed.]",
+                            false);
+                        resetChatSession();
+                    }
+                    else {
+                        addLog(user + " went offline", false);
+                    }
+                    break;
+                }
+
+                case MessageType::ONLINE_USERS_LIST: {
+                    json users = msg.payload["users"];
+                    std::vector<std::string> list;
+                    for (auto& u : users)
+                        list.push_back(u.get<std::string>());
+                    setOnlineUsers(list);
+                    break;
+                }
+
+                default: break;
+                }
+            }
+            catch (...) {
+                if (g_app.connected) {
+                    addLog("Connection lost", true);
+                    g_app.connected = false;
+                }
+                break;
+            }
+        }
         }).detach();
 }

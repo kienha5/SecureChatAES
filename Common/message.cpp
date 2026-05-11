@@ -20,6 +20,11 @@ namespace Protocol {
         case MessageType::ERROR_MSG:     return "ERROR_MSG";
         case MessageType::GET_CA_CERT: return "GET_CA_CERT";
 
+        case MessageType::USER_OFFLINE: return "USER_OFFLINE";
+        case MessageType::GET_ONLINE_USERS:  return "GET_ONLINE_USERS";
+        case MessageType::ONLINE_USERS_LIST: return "ONLINE_USERS_LIST";
+        case MessageType::USER_ONLINE:       return "USER_ONLINE";
+
         case MessageType::REVOKE_CERT:    return "REVOKE_CERT";
         case MessageType::REVOKE_SUCCESS: return "REVOKE_SUCCESS";
 
@@ -53,6 +58,11 @@ namespace Protocol {
         if (s == "SUCCESS")        return MessageType::SUCCESS;
         if (s == "ERROR_MSG")      return MessageType::ERROR_MSG;
         if (s == "GET_CA_CERT") return MessageType::GET_CA_CERT;
+
+        if (s == "USER_OFFLINE") return MessageType::USER_OFFLINE;
+        if (s == "GET_ONLINE_USERS")  return MessageType::GET_ONLINE_USERS;
+        if (s == "ONLINE_USERS_LIST") return MessageType::ONLINE_USERS_LIST;
+        if (s == "USER_ONLINE")       return MessageType::USER_ONLINE;
 
         if (s == "REVOKE_CERT")    return MessageType::REVOKE_CERT;
         if (s == "REVOKE_SUCCESS") return MessageType::REVOKE_SUCCESS;

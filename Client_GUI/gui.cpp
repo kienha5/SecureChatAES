@@ -123,6 +123,7 @@ static void renderLoginScreen() {
                         g_app.statusIsOk = true;
                         g_app.connected = true;
                         g_app.screen = AppScreen::MAIN;
+                        startAutoWait();
                     }
                     else {
                         g_app.statusMsg = "Login failed";
@@ -209,6 +210,70 @@ static void renderLoginScreen() {
 // ─── Main Chat Screen ─────────────────────────────────────────
 static void renderChatScreen() {
     ImGuiIO& io = ImGui::GetIO();
+
+    // ── Online Users Panel (window rieng, goi TRUOC main window) ──
+    float panelW = 160.0f;
+    float panelH = 200.0f;
+    ImGui::SetNextWindowPos(
+        { io.DisplaySize.x - panelW - 10.0f, 35.0f },
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize({ panelW, panelH }, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::Begin("##online", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.75f, 0.50f, 1.0f));
+    ImGui::Text("Online Users");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    ImGui::BeginChild("##userlist", { 0, panelH - 45 }, false);
+    {
+        std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+        if (g_app.onlineUsers.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
+            ImGui::Text("No one else online");
+            ImGui::PopStyleColor();
+        }
+        else {
+            for (auto& user : g_app.onlineUsers) {
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
+                ImGui::Text("●");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                bool isTarget = (std::string(g_app.targetUser) == user);
+                if (isTarget)
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImVec4(0.25f, 0.75f, 0.95f, 1.0f));
+
+                if (ImGui::Selectable(user.c_str(), isTarget, 0, { 0,0 }))
+                    snprintf(g_app.targetUser, sizeof(g_app.targetUser),
+                        "%s", user.c_str());
+
+                if (isTarget) ImGui::PopStyleColor();
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End(); // ket thuc ##online TRUOC khi bat dau ##main
+
+    // ── Main window (goi SAU online panel) ────────────────────
+    ImGui::SetNextWindowPos({ 0, 0 });
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("##main", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+
     ImGui::SetNextWindowPos({ 0, 0 });
     ImGui::SetNextWindowSize(io.DisplaySize);
 
@@ -242,6 +307,8 @@ static void renderChatScreen() {
         memset(g_app.username, 0, sizeof(g_app.username));
         memset(g_app.password, 0, sizeof(g_app.password));
     }
+
+    // Sau do moi den ImGui::Separator() cua main window
     ImGui::Separator();
 
     float totalH = ImGui::GetContentRegionAvail().y;
@@ -258,12 +325,20 @@ static void renderChatScreen() {
     ImGui::SameLine();
 
     if (!g_app.chatReady) {
-        if (ImGui::Button("Start E2EE Session")) {
-            startNetworkThread(true);   // asInitiator = true
+        if (ImGui::Button("Start Chat")) {
+            std::string target(g_app.targetUser);
+            if (!target.empty()) {
+                startNetworkThread(true); // asInitiator = true
+            }
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Wait for Session")) {
-            startNetworkThread(false);  // asInitiator = false
+
+        // Hint text nếu chưa nhập target
+        if (strlen(g_app.targetUser) == 0) {
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImVec4(0.55f, 0.55f, 0.55f, 1.0f));
+            ImGui::Text("(select from online list or type username)");
+            ImGui::PopStyleColor();
         }
     }
 
@@ -280,20 +355,33 @@ static void renderChatScreen() {
     ImGui::BeginChild("##chat", { 0, chatH }, false);
     {
         std::lock_guard<std::mutex> lock(g_app.msgMutex);
+		// Tin nhắn sẽ được render khác nhau dựa vào người gửi
         for (auto& msg : g_app.messages) {
-            if (msg.isMe) {
-                // Tin nhan cua minh - can phai
+            if (msg.from == "System") {
+                // System message - hiện giữa, màu vàng
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImVec4(0.90f, 0.75f, 0.20f, 1.0f));
+                float tw = ImGui::CalcTextSize(msg.text.c_str()).x;
+                ImGui::SetCursorPosX(
+                    std::max(0.0f,
+                        (ImGui::GetContentRegionAvail().x - tw) * 0.5f));
+                ImGui::Text("%s", msg.text.c_str());
+                ImGui::PopStyleColor();
+            }
+            else if (msg.isMe) {
+                // Tin nhắn của mình - căn phải, màu xanh
                 std::string label = "[Me]: " + msg.text;
                 float tw = ImGui::CalcTextSize(label.c_str()).x + 16;
                 ImGui::SetCursorPosX(
-                    std::max(0.0f, ImGui::GetContentRegionAvail().x - tw));
+                    std::max(0.0f,
+                        ImGui::GetContentRegionAvail().x - tw));
                 ImGui::PushStyleColor(ImGuiCol_Text,
                     ImVec4(0.25f, 0.75f, 0.95f, 1.0f));
                 ImGui::TextWrapped("%s", label.c_str());
                 ImGui::PopStyleColor();
             }
             else {
-                // Tin nhan tu nguoi khac - can trai
+                // Tin nhắn từ người khác - căn trái, màu trắng
                 ImGui::PushStyleColor(ImGuiCol_Text,
                     ImVec4(0.90f, 0.92f, 0.95f, 1.0f));
                 ImGui::TextWrapped("[%s]: %s",

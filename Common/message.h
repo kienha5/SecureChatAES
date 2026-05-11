@@ -37,6 +37,12 @@ enum class MessageType {
     KEY_EXCHANGE,      // A -> Server -> B: gui K_AB ma hoa
     KEY_ACK,           // B -> Server -> A: xac nhan nhan duoc K_AB
     CHAT_MESSAGE,      // A <-> B: tin nhan ma hoa
+
+	// User status
+    USER_OFFLINE,        // Server -> Client: thong bao doi phuong da offline
+    GET_ONLINE_USERS,    // Client -> Server: xin danh sach online
+    ONLINE_USERS_LIST,   // Server -> Client: tra ve danh sach
+    USER_ONLINE,         // Server -> Client: co user moi online
 };
 
 struct Message {

@@ -253,10 +253,39 @@ void handleChat(SSL* ssl, const std::string& username,
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
         username + " entered chat mode");
 
-    // Dang ky online
+    // Đăng ký online trước
     {
         std::lock_guard<std::mutex> lock(g_onlineMutex);
         g_onlineClients[username] = ssl;
+    }
+
+    // Gửi danh sách online hiện tại cho user mới vào
+    {
+        std::lock_guard<std::mutex> lock(g_onlineMutex);
+        json userList = json::array();
+        for (auto& [u, _] : g_onlineClients) {
+            if (u != username) userList.push_back(u);
+        }
+        Message listMsg;
+        listMsg.type = MessageType::ONLINE_USERS_LIST;
+        listMsg.payload["users"] = userList;
+        try { Protocol::sendMessage(ssl, listMsg); }
+        catch (...) {}
+    }
+
+    // Broadcast USER_ONLINE đến tất cả (trừ bản thân)
+    {
+        std::lock_guard<std::mutex> lock(g_onlineMutex);
+        Message onlineMsg;
+        onlineMsg.type = MessageType::USER_ONLINE;
+        onlineMsg.payload["user"] = username;
+
+        for (auto& [u, uSSL] : g_onlineClients) {
+            if (u != username) {
+                try { Protocol::sendMessage(uSSL, onlineMsg); }
+                catch (...) {}
+            }
+        }
     }
 
     try {
@@ -356,6 +385,20 @@ void handleChat(SSL* ssl, const std::string& username,
                 }
             }
 
+			// Client xin danh sách online users
+            else if (req.type == MessageType::GET_ONLINE_USERS) {
+                std::lock_guard<std::mutex> lock(g_onlineMutex);
+                json userList = json::array();
+                for (auto& [u, _] : g_onlineClients) {
+                    if (u != username) userList.push_back(u);
+                }
+                Message resp;
+                resp.type = MessageType::ONLINE_USERS_LIST;
+                resp.payload["users"] = userList;
+                try { Protocol::sendMessage(ssl, resp); }
+                catch (...) {}
+            }
+
             else {
                 Utils::log(Utils::LogLevel::WARN, "ChatServer",
                     "Unknown message type in chat mode");
@@ -369,12 +412,34 @@ void handleChat(SSL* ssl, const std::string& username,
     }
 
     // Xoa khoi online list
+    // Notify doi phuong neu dang chat
+    // Tim xem username nay dang chat voi ai
+    // bang cach broadcast USER_OFFLINE den tat ca online clients
     {
         std::lock_guard<std::mutex> lock(g_onlineMutex);
+
+        // Gui USER_OFFLINE den tat ca client con online
+        // Ho se tu biet minh co lien quan khong
+        Message offlineMsg;
+        offlineMsg.type = MessageType::USER_OFFLINE;
+        offlineMsg.payload["user"] = username;
+        offlineMsg.payload["reason"] = "User disconnected";
+
+        for (auto& [onlineUser, onlineSSL] : g_onlineClients) {
+            if (onlineUser != username) {
+                try {
+                    Protocol::sendMessage(onlineSSL, offlineMsg);
+                }
+                catch (...) {
+                    // Neu gui that bai thi bo qua
+                }
+            }
+        }
+
         g_onlineClients.erase(username);
     }
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
-        username + " went offline");
+        username + " went offline - notified online clients");
 }
 
 // ─── Xử lý 1 client ───────────────────────────────────────────

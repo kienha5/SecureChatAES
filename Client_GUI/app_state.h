@@ -73,6 +73,23 @@ struct AppState {
     // Dùng để báo network thread bắt đầu E2EE
     enum class NetCmd { NONE, START_SESSION, WAIT_SESSION };
     std::atomic<NetCmd> netCmd{ NetCmd::NONE };
+
+    // Online users list
+    std::vector<std::string> onlineUsers;
+    std::mutex onlineUsersMutex;
+
+	// Handshaking flag để tránh
+    std::atomic<bool> isHandshaking{ false };
+
+    // Queue cho handshake messages (KEY_EXCHANGE tu phia A gui den)
+    std::queue<Message> handshakeQueue;
+    std::mutex          handshakeQueueMutex;
+    std::condition_variable handshakeQueueCV;
+
+    // Queue cho chat messages
+    std::queue<Message> chatMsgQueue;
+    std::mutex          chatMsgQueueMutex;
+    std::condition_variable chatMsgQueueCV;
 };
 
 extern AppState g_app;
@@ -86,4 +103,51 @@ inline void pushInputQueue(const std::string& target, const std::string& text) {
     std::lock_guard<std::mutex> lock(g_app.inputQueueMutex);
     g_app.inputQueue.push({ target, text });
     g_app.inputQueueCV.notify_one();
+}
+
+inline void resetChatSession() {
+    g_app.chatReady = false;
+    g_app.K_AB.clear();
+    memset(g_app.targetUser, 0, sizeof(g_app.targetUser));
+
+    // Wake up send loop đang bị block
+    g_app.inputQueueCV.notify_all();
+
+    // Xóa tin nhắn cũ
+    {
+        std::lock_guard<std::mutex> lock(g_app.msgMutex);
+        g_app.messages.clear();
+    }
+
+    // Xóa pending messages trong queue
+    {
+        std::lock_guard<std::mutex> lock(g_app.inputQueueMutex);
+        while (!g_app.inputQueue.empty())
+            g_app.inputQueue.pop();
+    }
+}
+
+inline void setOnlineUsers(const std::vector<std::string>& users) {
+    std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+    g_app.onlineUsers = users;
+}
+
+inline void addOnlineUser(const std::string& user) {
+    std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+    // Không thêm bản thân và không thêm trùng
+    if (user != g_app.myUsername &&
+        std::find(g_app.onlineUsers.begin(),
+            g_app.onlineUsers.end(), user)
+        == g_app.onlineUsers.end()) {
+        g_app.onlineUsers.push_back(user);
+    }
+}
+
+inline void removeOnlineUser(const std::string& user) {
+    std::lock_guard<std::mutex> lock(g_app.onlineUsersMutex);
+    g_app.onlineUsers.erase(
+        std::remove(g_app.onlineUsers.begin(),
+            g_app.onlineUsers.end(), user),
+        g_app.onlineUsers.end()
+    );
 }
