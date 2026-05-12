@@ -136,6 +136,9 @@ void handleClient(SSL* ssl) {
 
             Utils::log(Utils::LogLevel::INFO, "RA", "REGISTER_CERT from: " + username);
 
+			// Ghi log audit về request đăng ký (chỉ ghi username, không ghi nonce hay timestamp để tránh log quá nhiều)
+            Utils::auditLog("RA", "REGISTER_REQUEST", "username=" + username);
+
             // Bước 3: Check timestamp
             if (Utils::isExpired(clientTs)) {
                 Utils::log(Utils::LogLevel::WARN, "RA", "Timestamp expired");
@@ -157,6 +160,11 @@ void handleClient(SSL* ssl) {
                         "REPLAY ATTACK DETECTED - nonce already used: " + safeNonceLog + "...");
                     Utils::log(Utils::LogLevel::WARN, "RA",
                         "Request from potential attacker blocked");
+
+					// Ghi log audit về replay attack (ghi cả nonce và username để dễ điều tra, nhưng chỉ ghi một phần nonce)
+                    Utils::auditLog("RA", "REPLAY_DETECTED",   
+                        "nonce=" + clientNonce.substr(0, 16) +
+                        " username=" + username);
 
                     Message err; err.type = MessageType::ERROR_MSG;
                     err.payload["reason"] = "Replay attack detected - nonce already used";
@@ -191,6 +199,10 @@ void handleClient(SSL* ssl) {
             }
             Utils::log(Utils::LogLevel::INFO, "RA", "Signature OK for: " + username);
 
+			// Ghi log audit về việc đăng ký thành công 
+            // (ghi username, không ghi nonce hay signature để tránh log quá nhiều và bảo vệ thông tin nhạy cảm)
+            Utils::auditLog("RA", "SIGNATURE_OK", "username=" + username);
+
             // Bước 7: Forward đến CA
             std::string certPEM = forwardToCA(username, pubKeyPEM);
             if (certPEM.empty()) {
@@ -199,6 +211,9 @@ void handleClient(SSL* ssl) {
                 Protocol::sendMessage(ssl, err);
                 goto cleanup;
             }
+
+			// Ghi log audit về việc forward request đến CA (chỉ ghi username, không ghi chi tiết cert để tránh log quá nhiều)
+            Utils::auditLog("RA", "CERT_FORWARDED_TO_CA", "username=" + username);
 
             // Bước 8: Trả cert về cho client
             Message resp;
@@ -220,6 +235,8 @@ void handleClient(SSL* ssl) {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
+
     Utils::log(Utils::LogLevel::INFO, "RA",
         "Starting RA Server on port " +
         std::to_string(Config::PORT_RA) + "...");

@@ -7,6 +7,9 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
+#include <filesystem>
+#include <mutex>
 
 namespace Utils {
 
@@ -97,5 +100,75 @@ namespace Utils {
         if (!f.is_open()) return false;
         f << content;
         return true;
+    }
+
+    // ─── Audit Log ────────────────────────────────────────────────
+    static std::ofstream g_auditFile;
+    static std::mutex    g_auditMutex;
+
+    void Utils::initAuditLog(const std::string& logDir) {
+        std::filesystem::create_directories(logDir);
+
+        // Ten file: audit_YYYY-MM-DD_HH-MM-SS.log
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm;
+        localtime_s(&tm, &t);
+
+        std::ostringstream fname;
+        fname << logDir << "\\audit_"
+            << std::setfill('0')
+            << std::setw(4) << (tm.tm_year + 1900) << "-"
+            << std::setw(2) << (tm.tm_mon + 1) << "-"
+            << std::setw(2) << tm.tm_mday << "_"
+            << std::setw(2) << tm.tm_hour << "-"
+            << std::setw(2) << tm.tm_min << "-"
+            << std::setw(2) << tm.tm_sec
+            << ".log";
+
+        std::lock_guard<std::mutex> lock(g_auditMutex);
+        g_auditFile.open(fname.str(), std::ios::app);
+        if (g_auditFile.is_open()) {
+            g_auditFile << "=== Audit Log Started: "
+                << fname.str() << " ===\n";
+            g_auditFile.flush();
+            log(LogLevel::INFO, "Audit",
+                "Log file opened: " + fname.str());
+        }
+        else {
+            log(LogLevel::ERR, "Audit",
+                "Failed to open log file: " + fname.str());
+        }
+    }
+
+    void Utils::auditLog(const std::string& module,
+        const std::string& event,
+        const std::string& detail) {
+        // Lay timestamp
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm;
+        localtime_s(&tm, &t);
+
+        std::ostringstream entry;
+        entry << std::setfill('0')
+            << "[" << std::setw(4) << (tm.tm_year + 1900)
+            << "-" << std::setw(2) << (tm.tm_mon + 1)
+            << "-" << std::setw(2) << tm.tm_mday
+            << " " << std::setw(2) << tm.tm_hour
+            << ":" << std::setw(2) << tm.tm_min
+            << ":" << std::setw(2) << tm.tm_sec << "]"
+            << "[" << module << "]"
+            << "[" << event << "]";
+
+        if (!detail.empty())
+            entry << " " << detail;
+        entry << "\n";
+
+        std::lock_guard<std::mutex> lock(g_auditMutex);
+        if (g_auditFile.is_open()) {
+            g_auditFile << entry.str();
+            g_auditFile.flush();
+        }
     }
 }

@@ -29,4 +29,10 @@ namespace Utils {
     // File helpers
     std::string loadPEM(const std::string& path);
     bool        savePEM(const std::string& path, const std::string& content);
+
+    // Audit log
+    void initAuditLog(const std::string& logDir);
+    void auditLog(const std::string& module,
+        const std::string& event,
+        const std::string& detail = "");
 }

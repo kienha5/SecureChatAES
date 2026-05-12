@@ -84,4 +84,9 @@ namespace Config {
         static const std::string s = "Kv_Secret_Chat";
         return s;
     }
+
+	// ─── Audit log ─────────────────────────────────────────────
+    inline std::string AUDIT_LOG_DIR() {
+        return getSolutionDir() + "AuditLogs\\";
+    }
 }

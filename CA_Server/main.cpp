@@ -159,6 +159,11 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
         g_revokedDB[serial] = false;
     }
 
+	// --- Ghi log audit (không cần lock vì chỉ đọc serial và username) ---
+    Utils::auditLog("CA", "CERT_ISSUED",   
+        "username=" + username +
+        " serial=" + std::to_string(serial));
+
     // --- Ghi ra file mà KHÔNG giữ lock của hàm này (vì saveDB đã tự lock) ---
     saveDB();
 
@@ -212,6 +217,11 @@ void handleClient(SSL* ssl) {
                 }
             }
 
+			// Ghi log audit về việc verify (chỉ có serial và status, không cần lock nữa)
+            Utils::auditLog("CA", "CERT_VERIFIED",
+                "serial=" + std::to_string(serial) +
+                " status=" + status);
+
             Utils::log(Utils::LogLevel::INFO, "CA",
                 "VERIFY_CERT serial=" + std::to_string(serial) + " → " + status);
 
@@ -239,6 +249,11 @@ void handleClient(SSL* ssl) {
 
             // --- Xử lý việc lưu và gửi tin nhắn ở NGOÀI lock ---
             if (found) {
+				// Ghi log audit về việc revoke (đã có serial và username từ RAM, nên không cần lock nữa)
+                Utils::auditLog("CA", "CERT_REVOKED",  
+                    "username=" + revokedUser +
+                    " serial=" + std::to_string(serial));
+
                 saveDB(); // Persist an toàn (không bị deadlock)
                 Utils::log(Utils::LogLevel::WARN, "CA",
                     "Cert REVOKED: serial=" + std::to_string(serial) +
@@ -279,6 +294,8 @@ void handleClient(SSL* ssl) {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
+
     Utils::log(Utils::LogLevel::INFO, "CA",
         "Starting CA Server on port " +
         std::to_string(Config::PORT_CA) + "...");

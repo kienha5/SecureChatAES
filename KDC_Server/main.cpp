@@ -278,6 +278,10 @@ void handleAS(SSL* ssl) {
 	{
 		std::lock_guard<std::mutex> lock(g_principalMutex);
 		if (!g_principals.count(username)) {
+			// Ghi log audit về việc xin TGT cho user không tồn tại (chỉ ghi username, không ghi chi tiết để tránh log quá nhiều)
+			Utils::auditLog("KDC", "AS_REQUEST_UNKNOWN_USER",
+				"username=" + username);
+
 			Utils::log(Utils::LogLevel::WARN, "KDC", "Unknown principal: " + username);
 			Message err; err.type = MessageType::ERROR_MSG;
 			err.payload["reason"] = "Unknown user";
@@ -502,6 +506,11 @@ void handleClient(SSL* ssl) {
 			Utils::log(Utils::LogLevel::INFO, "KDC",
 				"Principal created for: " + username);
 
+			// Ghi log audit cho sự kiện đăng ký thành công 
+			// (chỉ ghi username, không ghi chi tiết hash hay cert để tránh log quá nhiều
+			Utils::auditLog("KDC", "PRINCIPAL_REGISTERED",
+				"username=" + username);
+
 			Message success;
 			success.type = MessageType::KDC_REGISTER_SUCCESS;
 			success.payload["message"] = "KDC registration successful";
@@ -562,6 +571,12 @@ void handleClient(SSL* ssl) {
 			resp.payload["enc_response"] = Utils::base64Encode(encResp);
 			resp.payload["iv_resp"] = Utils::base64Encode(iv_resp);
 			Protocol::sendMessage(ssl, resp);
+
+			// Ghi log audit cho sự kiện cấp TGT (có thể ghi lifetime để biết thời hạn của vé)
+			Utils::auditLog("KDC", "TGT_ISSUED",
+				"username=" + username +
+				" lifetime=" + std::to_string(lifetime));
+
 			Utils::log(Utils::LogLevel::INFO, "KDC", "TGT issued for: " + username);
 		}
 		else if (peek.type == MessageType::TGS_REQUEST) {
@@ -585,6 +600,10 @@ void handleClient(SSL* ssl) {
 			auto Kc_tgs = Utils::base64Decode(Kc_tgs_b64);
 
 			if (Utils::isExpired(ticketTs, (int)lt)) {
+				// Ghi log audit cho sự kiện TGT hết hạn
+				Utils::auditLog("KDC", "TGT_EXPIRED",
+					"username=" + username);
+
 				Message err; err.type = MessageType::ERROR_MSG;
 				err.payload["reason"] = "TGT expired";
 				Protocol::sendMessage(ssl, err);
@@ -633,6 +652,11 @@ void handleClient(SSL* ssl) {
 			resp.payload["enc_response"] = Utils::base64Encode(encResp);
 			resp.payload["iv_resp"] = Utils::base64Encode(iv_resp);
 			Protocol::sendMessage(ssl, resp);
+
+			// Ghi log audit cho sự kiện cấp Service Ticket
+			Utils::auditLog("KDC", "SERVICE_TICKET_ISSUED",
+				"username=" + username);
+
 			Utils::log(Utils::LogLevel::INFO, "KDC",
 				"Service ticket issued for: " + username);
 		}
@@ -717,12 +741,15 @@ bool initKDC() {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
+	// Cho phép override ticket lifetime qua command line để test nhanh
 	if (argc > 1) {
 		g_ticketLifetime = std::atoi(argv[1]);
 		Utils::log(Utils::LogLevel::WARN, "KDC",
 			"TEST MODE - ticket lifetime: " +
 			std::to_string(g_ticketLifetime) + "s");
 	}
+
+	Utils::initAuditLog(Config::AUDIT_LOG_DIR());
 
 	Utils::log(Utils::LogLevel::INFO, "KDC",
 		"Starting KDC Server on port " +

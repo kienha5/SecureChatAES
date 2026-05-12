@@ -237,6 +237,9 @@ void handleLogin(SSL* ssl) {
 
         Utils::log(Utils::LogLevel::INFO, "ChatServer",
             "Login successful for: " + username);
+
+		// Ghi log audit cho sự kiện login thành công
+        Utils::auditLog("ChatServer", "LOGIN_SUCCESS", "username=" + username);
     }
     catch (std::exception& e) {
         Utils::log(Utils::LogLevel::ERR, "ChatServer",
@@ -338,6 +341,10 @@ void handleChat(SSL* ssl, const std::string& username,
                     Protocol::sendMessage(g_onlineClients[targetUser], req);
                     Utils::log(Utils::LogLevel::INFO, "ChatServer",
                         "KEY_EXCHANGE relayed to " + targetUser);
+
+					// Ghi log audit cho sự kiện trao đổi khóa
+                    Utils::auditLog("ChatServer", "KEY_EXCHANGE_RELAYED",
+                        "from=" + username + " to=" + targetUser);
                 }
                 else {
                     Message err; err.type = MessageType::ERROR_MSG;
@@ -454,6 +461,9 @@ void handleChat(SSL* ssl, const std::string& username,
     }
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
         username + " went offline - notified online clients");
+
+	// Ghi log audit cho sự kiện user offline
+    Utils::auditLog("ChatServer", "USER_OFFLINE", "username=" + username);
 }
 
 // ─── Xử lý 1 client ───────────────────────────────────────────
@@ -482,6 +492,9 @@ void handleClient(SSL* ssl) {
                 Message err; err.type = MessageType::ERROR_MSG;
                 err.payload["reason"] = "Certificate invalid or revoked";
                 Protocol::sendMessage(ssl, err);
+
+                Utils::auditLog("ChatServer", "LOGIN_REJECTED_REVOKED_CERT", "username=" + username);
+
                 goto cleanup;
             }
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
@@ -557,6 +570,9 @@ void handleClient(SSL* ssl) {
 
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
                 "Account created for: " + username);
+
+			// Ghi log audit cho CA về việc đăng ký account mới
+            Utils::auditLog("ChatServer", "ACCOUNT_REGISTERED", "username=" + username);
 
             Message success;
             success.type = MessageType::SUCCESS;
@@ -649,6 +665,9 @@ void handleClient(SSL* ssl) {
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
                 "Login successful for: " + username);
 
+			// Ghi log audit cho sự kiện login thành công
+            Utils::auditLog("ChatServer", "LOGIN_SUCCESS", "username=" + username);
+
             handleChat(ssl, username, Kc_v);
 
             {
@@ -735,6 +754,8 @@ bool initChatServer() {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
+
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
         "Starting Chat Server on port " +
         std::to_string(Config::PORT_CHAT) + "...");
