@@ -112,18 +112,28 @@ std::string extractPublicKey(const std::string& certPEM) {
 
 // ─── Verify cert với CA ───────────────────────────────────────
 bool verifyCertWithCA(const std::string& certPEM) {
+	// Parse serial nội bộ
 	BIO* bio = BIO_new_mem_buf(certPEM.data(), (int)certPEM.size());
 	X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
 	BIO_free(bio);
 	if (!cert) return false;
 
-	int serial = (int)ASN1_INTEGER_get(X509_get_serialNumber(cert));
+	int serial = (int)ASN1_INTEGER_get(
+		X509_get_serialNumber(cert));
 	X509_free(cert);
 
-	SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
+	// Route đến đúng CA dựa vào serial
+	int port = (serial >= 2000)
+		? Config::PORT_INTERMED_CA
+		: Config::PORT_CA;
+	std::string caCertPath = (serial >= 2000)
+		? Config::INTERMED_CA_CERT()
+		: Config::CA_CERT();
+
+	SSL_CTX* ctx = Network::createClientContext(caCertPath);
 	if (!ctx) return false;
 
-	SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5000);
+	SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", port);
 	if (!ssl) { Network::freeContext(ctx); return false; }
 
 	Message req;
@@ -707,12 +717,38 @@ bool initKDC() {
 
 		// Xin CA ky cert cho KDC
 		Utils::log(Utils::LogLevel::INFO, "KDC", "Requesting cert from CA...");
+		std::string intermCACertPEM = Utils::loadPEM(
+			Config::INTERMED_CA_CERT());
+		if (intermCACertPEM.empty()) {
+			SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+			SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+			SSL* ssl = Network::connectToServer(
+				ctx, "127.0.0.1", Config::PORT_INTERMED_CA);
+			if (ssl) {
+				Message req;
+				req.type = MessageType::GET_INTERMED_CA_CERT;
+				Protocol::sendMessage(ssl, req);
+				Message resp = Protocol::recvMessage(ssl);
+				if (resp.type == MessageType::CERT_RESPONSE) {
+					intermCACertPEM = resp.payload["cert"];
+					// Luu chain file
+					std::string chain = resp.payload["chain"];
+					Utils::savePEM(Config::INTERMED_CA_CERT(),
+						intermCACertPEM);
+					Utils::savePEM(Config::CA_CHAIN(), chain);
+				}
+				int s = SSL_get_fd(ssl);
+				Network::closeConnection(ssl, s);
+			}
+			SSL_CTX_free(ctx);
+		}
+
 		bool ok = Crypto::requestCertFromCA(
 			"SecureChat-KDC", 365,
-			"127.0.0.1", Config::PORT_CA,
-			caCertPEM,
-			certPEM, keyPEM
+			"127.0.0.1", Config::PORT_INTERMED_CA, // <- IntermCA
+			intermCACertPEM, certPEM, keyPEM
 		);
+
 		if (!ok) {
 			Utils::log(Utils::LogLevel::ERR, "KDC", "Failed to get cert from CA");
 			return false;

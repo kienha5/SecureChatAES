@@ -86,14 +86,40 @@ bool initRA() {
         SSL_CTX_free(ctx);
     }
 
-    // Xin CA ky cert cho RA
-    Utils::log(Utils::LogLevel::INFO, "RA", "Requesting cert from CA...");
+    // Xin CA ký cert cho RA
+    // Download IntermCA cert trước
+    std::string intermCACertPEM = Utils::loadPEM(
+        Config::INTERMED_CA_CERT());
+    if (intermCACertPEM.empty()) {
+        SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+        SSL* ssl = Network::connectToServer(
+            ctx, "127.0.0.1", Config::PORT_INTERMED_CA);
+        if (ssl) {
+            Message req;
+            req.type = MessageType::GET_INTERMED_CA_CERT;
+            Protocol::sendMessage(ssl, req);
+            Message resp = Protocol::recvMessage(ssl);
+            if (resp.type == MessageType::CERT_RESPONSE) {
+                intermCACertPEM = resp.payload["cert"];
+                // Lưu chain file
+                std::string chain = resp.payload["chain"];
+                Utils::savePEM(Config::INTERMED_CA_CERT(),
+                    intermCACertPEM);
+                Utils::savePEM(Config::CA_CHAIN(), chain);
+            }
+            int s = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, s);
+        }
+        SSL_CTX_free(ctx);
+    }
+
     bool ok = Crypto::requestCertFromCA(
         "SecureChat-RA", 365,
-        "127.0.0.1", Config::PORT_CA,
-        caCertPEM,
-        certPEM, keyPEM
+        "127.0.0.1", Config::PORT_INTERMED_CA, // <- IntermCA
+        intermCACertPEM, certPEM, keyPEM
     );
+
     if (!ok) {
         Utils::log(Utils::LogLevel::ERR, "RA", "Failed to get cert from CA");
         return false;

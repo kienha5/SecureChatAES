@@ -89,4 +89,15 @@ namespace Config {
     inline std::string AUDIT_LOG_DIR() {
         return getSolutionDir() + "AuditLogs\\";
     }
+
+    // Thêm port và cert cho Intermediate CA
+    constexpr int PORT_INTERMED_CA = 5004;
+
+    inline std::string INTERMED_CA_CERT() { return certPath("intermed_ca.crt"); }
+    inline std::string INTERMED_CA_KEY() { return certPath("intermed_ca.key"); }
+    inline std::string INTERMED_CA_DB() { return certPath("intermed_ca_db.json"); }
+
+    // Chain file: chứa cả Root CA cert + Intermed CA cert
+    // Client dùng để verify toàn bộ chain
+    inline std::string CA_CHAIN() { return certPath("ca_chain.crt"); }
 }

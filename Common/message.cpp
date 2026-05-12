@@ -44,6 +44,9 @@ namespace Protocol {
         case MessageType::KEY_ACK:          return "KEY_ACK";
         case MessageType::CHAT_MESSAGE:     return "CHAT_MESSAGE";
 
+        case MessageType::GET_INTERMED_CA_CERT: return "GET_INTERMED_CA_CERT";
+        case MessageType::SIGN_CERT_REQ:        return "SIGN_CERT_REQ";
+
         default:                         return "UNKNOWN";
         }
     }
@@ -82,6 +85,9 @@ namespace Protocol {
         if (s == "KEY_EXCHANGE")     return MessageType::KEY_EXCHANGE;
         if (s == "KEY_ACK")          return MessageType::KEY_ACK;
         if (s == "CHAT_MESSAGE")     return MessageType::CHAT_MESSAGE;
+
+        if (s == "GET_INTERMED_CA_CERT") return MessageType::GET_INTERMED_CA_CERT;
+        if (s == "SIGN_CERT_REQ")        return MessageType::SIGN_CERT_REQ;
 
         throw std::runtime_error("Unknown message type: " + s);
     }

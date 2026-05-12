@@ -11,6 +11,7 @@
 #include <fstream>
 #include <openssl/ssl.h>
 #include "message.h"
+#include <openssl/x509v3.h>
 
 namespace Crypto {
 
@@ -493,5 +494,141 @@ namespace Crypto {
         SSL_CTX_free(sslCtx);
         closesocket(sock);
         return ok;
+    }
+
+	// Bước 1: CA server ký cert cho Intermediate CA
+    bool Crypto::generateCACert(
+        const std::string& commonName,
+        int validDays,
+        const std::string& issuerCertPEM,
+        const std::string& issuerKeyPEM,
+        std::string& outCertPEM,
+        std::string& outKeyPEM)
+    {
+        // Load issuer cert + key
+        BIO* cb = BIO_new_mem_buf(issuerCertPEM.data(),
+            (int)issuerCertPEM.size());
+        X509* issuerCert = PEM_read_bio_X509(cb, nullptr, nullptr, nullptr);
+        BIO_free(cb);
+
+        BIO* kb = BIO_new_mem_buf(issuerKeyPEM.data(),
+            (int)issuerKeyPEM.size());
+        EVP_PKEY* issuerKey = PEM_read_bio_PrivateKey(
+            kb, nullptr, nullptr, nullptr);
+        BIO_free(kb);
+
+        if (!issuerCert || !issuerKey) return false;
+
+        // Sinh keypair mới cho Intermediate CA
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+        EVP_PKEY_keygen_init(ctx);
+        EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048);
+        EVP_PKEY* pkey = nullptr;
+        EVP_PKEY_keygen(ctx, &pkey);
+        EVP_PKEY_CTX_free(ctx);
+
+        // Tạo X509 cert
+        X509* cert = X509_new();
+        int serial = (int)(time(nullptr) & 0xFFFF) + 1000;
+        ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
+
+        X509_gmtime_adj(X509_get_notBefore(cert), 0);
+        X509_gmtime_adj(X509_get_notAfter(cert),
+            60LL * 60 * 24 * validDays);
+
+        // Subject
+        X509_NAME* name = X509_get_subject_name(cert);
+        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+            (unsigned char*)commonName.c_str(), -1, -1, 0);
+
+        // Issuer = issuerCert subject
+        X509_set_issuer_name(cert,
+            X509_get_subject_name(issuerCert));
+
+        // Public key
+        X509_set_pubkey(cert, pkey);
+
+        // Basic Constraints: CA:TRUE — đây là điểm khác với end-entity cert
+        X509_EXTENSION* ext = X509V3_EXT_conf_nid(
+            nullptr, nullptr, NID_basic_constraints, "CA:TRUE");
+        if (ext) {
+            X509_add_ext(cert, ext, -1);
+            X509_EXTENSION_free(ext);
+        }
+
+        // Key Usage: keyCertSign, cRLSign
+        X509_EXTENSION* ku = X509V3_EXT_conf_nid(
+            nullptr, nullptr, NID_key_usage,
+            "critical,keyCertSign,cRLSign");
+        if (ku) {
+            X509_add_ext(cert, ku, -1);
+            X509_EXTENSION_free(ku);
+        }
+
+        // Ký bằng issuer key
+        X509_sign(cert, issuerKey, EVP_sha256());
+
+        outCertPEM = x509ToPEM(cert);
+        outKeyPEM = pkeyToPEM(pkey);
+
+        X509_free(cert);
+        EVP_PKEY_free(pkey);
+        X509_free(issuerCert);
+        EVP_PKEY_free(issuerKey);
+        return true;
+    }
+
+    bool Crypto::verifyCertChain(
+        const std::string& certPEM,
+        const std::string& intermCACertPEM,
+        const std::string& rootCACertPEM)
+    {
+        // Load certs
+        auto loadCert = [](const std::string& pem) -> X509* {
+            BIO* bio = BIO_new_mem_buf(pem.data(), (int)pem.size());
+            X509* c = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+            BIO_free(bio);
+            return c;
+            };
+
+        X509* cert = loadCert(certPEM);
+        X509* intermCA = loadCert(intermCACertPEM);
+        X509* rootCA = loadCert(rootCACertPEM);
+
+        if (!cert || !intermCA || !rootCA) {
+            if (cert)    X509_free(cert);
+            if (intermCA)X509_free(intermCA);
+            if (rootCA)  X509_free(rootCA);
+            return false;
+        }
+
+        // Tạo trust store với RootCA
+        X509_STORE* store = X509_STORE_new();
+        X509_STORE_add_cert(store, rootCA);
+
+        // Tạo chain: [intermCA]
+        STACK_OF(X509)* chain = sk_X509_new_null();
+        sk_X509_push(chain, intermCA);
+
+        // Verify
+        X509_STORE_CTX* storeCtx = X509_STORE_CTX_new();
+        X509_STORE_CTX_init(storeCtx, store, cert, chain);
+        int result = X509_verify_cert(storeCtx);
+
+        if (result != 1) {
+            Utils::log(Utils::LogLevel::ERR, "Crypto",
+                "Chain verification failed: " +
+                std::string(X509_verify_cert_error_string(
+                    X509_STORE_CTX_get_error(storeCtx))));
+        }
+
+        X509_STORE_CTX_free(storeCtx);
+        sk_X509_free(chain);
+        X509_STORE_free(store);
+        X509_free(cert);
+        X509_free(intermCA);
+        X509_free(rootCA);
+
+        return result == 1;
     }
 }

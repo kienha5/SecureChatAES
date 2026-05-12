@@ -43,6 +43,10 @@ enum class MessageType {
     GET_ONLINE_USERS,    // Client -> Server: xin danh sach online
     ONLINE_USERS_LIST,   // Server -> Client: tra ve danh sach
     USER_ONLINE,         // Server -> Client: co user moi online
+
+	// Intermediate CA flow
+    GET_INTERMED_CA_CERT,   // Server -> IntermCA: xin cert
+    SIGN_CERT_REQ,          // IntermCA -> RootCA: xin RootCA ky cert
 };
 
 struct Message {
