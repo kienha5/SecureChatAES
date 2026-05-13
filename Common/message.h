@@ -18,6 +18,7 @@ enum class MessageType {
     ERROR_MSG,
     REVOKE_CERT,    // Admin -> CA: thu hồi cert
     REVOKE_SUCCESS, // CA -> Admin: xác nhận thu hồi
+    GET_CA_CERT,      // Server -> CA: xin CA cert
 
     // Kerberos flow
     KDC_REGISTER_INIT,    // Client → KDC: đăng ký principal
@@ -36,6 +37,16 @@ enum class MessageType {
     KEY_EXCHANGE,      // A -> Server -> B: gui K_AB ma hoa
     KEY_ACK,           // B -> Server -> A: xac nhan nhan duoc K_AB
     CHAT_MESSAGE,      // A <-> B: tin nhan ma hoa
+
+	// User status
+    USER_OFFLINE,        // Server -> Client: thong bao doi phuong da offline
+    GET_ONLINE_USERS,    // Client -> Server: xin danh sach online
+    ONLINE_USERS_LIST,   // Server -> Client: tra ve danh sach
+    USER_ONLINE,         // Server -> Client: co user moi online
+
+	// Intermediate CA flow
+    GET_INTERMED_CA_CERT,   // Server -> IntermCA: xin cert
+    SIGN_CERT_REQ,          // IntermCA -> RootCA: xin RootCA ky cert
 };
 
 struct Message {

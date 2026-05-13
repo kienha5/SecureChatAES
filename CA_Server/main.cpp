@@ -21,7 +21,7 @@ static std::map<int, bool>        g_revokedDB; // serial → revoked
 static std::mutex g_dbMutex;
 
 // ─── File paths ───────────────────────────────────────────────
-static const std::string DB_FILE = "C:\\SecureChatCerts\\ca_db.json";
+static const std::string DB_FILE = Config::CA_DB();
 
 // ─── Luu DB ra file ───────────────────────────────────────────
 void saveDB() {
@@ -72,38 +72,23 @@ void loadDB() {
 }
 
 // ─── Load CA cert + key từ file ───────────────────────────────
-bool loadCA(const std::string& certPath, const std::string& keyPath) {
-    // Load cert
-    FILE* f = fopen(certPath.c_str(), "r");
-    if (!f) { Utils::log(Utils::LogLevel::ERR, "CA", "Cannot open cert: " + certPath); return false; }
-    X509* cert = PEM_read_X509(f, nullptr, nullptr, nullptr);
-    fclose(f);
-    if (!cert) return false;
+bool initCA() {
+    Config::ensureCertDir();
+    std::string certPEM, keyPEM;
 
-    BIO* bio = BIO_new(BIO_s_mem());
-    PEM_write_bio_X509(bio, cert);
-    BUF_MEM* ptr;
-    BIO_get_mem_ptr(bio, &ptr);
-    g_caCertPEM = std::string(ptr->data, ptr->length);
-    BIO_free(bio);
-    X509_free(cert);
+    // Self-signed: khong can CA ben ngoai
+    bool ok = Crypto::loadOrCreate(
+        Config::CA_CERT(), Config::CA_KEY(),
+        "SecureChat-CA", 3650,  // 10 nam
+        "", "",                  // self-signed
+        certPEM, keyPEM
+    );
+    if (!ok) return false;
 
-    // Load key
-    FILE* fk = fopen(keyPath.c_str(), "r");
-    if (!fk) { Utils::log(Utils::LogLevel::ERR, "CA", "Cannot open key: " + keyPath); return false; }
-    EVP_PKEY* pkey = PEM_read_PrivateKey(fk, nullptr, nullptr, nullptr);
-    fclose(fk);
-    if (!pkey) return false;
-
-    BIO* kbio = BIO_new(BIO_s_mem());
-    PEM_write_bio_PrivateKey(kbio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
-    BUF_MEM* kptr;
-    BIO_get_mem_ptr(kbio, &kptr);
-    g_caKeyPEM = std::string(kptr->data, kptr->length);
-    BIO_free(kbio);
-    EVP_PKEY_free(pkey);
-
-    Utils::log(Utils::LogLevel::INFO, "CA", "CA cert and key loaded");
+    g_caCertPEM = certPEM;
+    g_caKeyPEM = keyPEM;
+    loadDB();
+    Utils::log(Utils::LogLevel::INFO, "CA", "CA ready");
     return true;
 }
 
@@ -174,6 +159,11 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
         g_revokedDB[serial] = false;
     }
 
+	// --- Ghi log audit (không cần lock vì chỉ đọc serial và username) ---
+    Utils::auditLog("CA", "CERT_ISSUED",   
+        "username=" + username +
+        " serial=" + std::to_string(serial));
+
     // --- Ghi ra file mà KHÔNG giữ lock của hàm này (vì saveDB đã tự lock) ---
     saveDB();
 
@@ -188,7 +178,6 @@ std::string issueCert(const std::string& username, const std::string& pubKeyPEM)
     return certPEM;
 }
 
-// ─── Xử lý 1 client (chạy trong thread) ──────────────────────
 // ─── Xử lý 1 client (chạy trong thread) ──────────────────────
 void handleClient(SSL* ssl) {
     try {
@@ -228,6 +217,11 @@ void handleClient(SSL* ssl) {
                 }
             }
 
+			// Ghi log audit về việc verify (chỉ có serial và status, không cần lock nữa)
+            Utils::auditLog("CA", "CERT_VERIFIED",
+                "serial=" + std::to_string(serial) +
+                " status=" + status);
+
             Utils::log(Utils::LogLevel::INFO, "CA",
                 "VERIFY_CERT serial=" + std::to_string(serial) + " → " + status);
 
@@ -255,6 +249,11 @@ void handleClient(SSL* ssl) {
 
             // --- Xử lý việc lưu và gửi tin nhắn ở NGOÀI lock ---
             if (found) {
+				// Ghi log audit về việc revoke (đã có serial và username từ RAM, nên không cần lock nữa)
+                Utils::auditLog("CA", "CERT_REVOKED",  
+                    "username=" + revokedUser +
+                    " serial=" + std::to_string(serial));
+
                 saveDB(); // Persist an toàn (không bị deadlock)
                 Utils::log(Utils::LogLevel::WARN, "CA",
                     "Cert REVOKED: serial=" + std::to_string(serial) +
@@ -275,6 +274,15 @@ void handleClient(SSL* ssl) {
                 Protocol::sendMessage(ssl, err);
             }
         }
+
+        else if (req.type == MessageType::GET_CA_CERT) {
+            Utils::log(Utils::LogLevel::INFO, "CA",
+                "Sending CA cert to requester");
+            Message resp;
+            resp.type = MessageType::CERT_RESPONSE;
+            resp.payload["cert"] = g_caCertPEM;
+            Protocol::sendMessage(ssl, resp);
+        }
     }
     catch (std::exception& e) {
         Utils::log(Utils::LogLevel::ERR, "CA", std::string("Exception: ") + e.what());
@@ -286,36 +294,34 @@ void handleClient(SSL* ssl) {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
-    Utils::log(Utils::LogLevel::INFO, "CA", "Starting CA Server on port 5000...");
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
 
-    if (!loadCA("C:\\SecureChatCerts\\ca.crt", "C:\\SecureChatCerts\\ca.key")) {
-        Utils::log(Utils::LogLevel::ERR, "CA", "Failed to load CA. Exiting.");
+    Utils::log(Utils::LogLevel::INFO, "CA",
+        "Starting CA Server on port " +
+        std::to_string(Config::PORT_CA) + "...");
+
+    if (!initCA()) {
+        Utils::log(Utils::LogLevel::ERR, "CA", "Init failed");
         return 1;
     }
 
-    loadDB();
-
     SSL_CTX* ctx = Network::createServerContext(
-        "C:\\SecureChatCerts\\ca.crt",
-        "C:\\SecureChatCerts\\ca.key"
-    );
+        Config::CA_CERT(), Config::CA_KEY());
     if (!ctx) return 1;
 
-    int serverSock = Network::createServerSocket(5000);
+    int serverSock = Network::createServerSocket(Config::PORT_CA);
     if (serverSock < 0) return 1;
 
-    Utils::log(Utils::LogLevel::INFO, "CA", "CA Server ready. Waiting for connections...");
+    Utils::log(Utils::LogLevel::INFO, "CA",
+        "CA Server ready. Waiting for connections...");
 
     while (true) {
         int clientSock = 0;
         SSL* ssl = Network::acceptClient(ctx, serverSock, clientSock);
         if (!ssl) continue;
-
-        // Mỗi client chạy trong thread riêng
         std::thread t(handleClient, ssl);
         t.detach();
     }
-
     Network::freeContext(ctx);
     return 0;
 }

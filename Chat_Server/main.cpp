@@ -30,7 +30,7 @@ static std::map<std::string, SSL*> g_onlineClients;
 static std::mutex g_onlineMutex;
 
 // ─── Load/Save DB ─────────
-static const std::string CHAT_DB_FILE = "C:\\SecureChatCerts\\chat_db.json";
+static const std::string CHAT_DB_FILE = Config::CHAT_DB();
 
 void saveChatDB() {
     std::lock_guard<std::mutex> lock(g_accountMutex);
@@ -78,25 +78,33 @@ void loadChatDB() {
 
 // ─── Verify cert với CA (online) ──────────────────────────────
 bool verifyCertWithCA(const std::string& certPEM, int& outSerial) {
-    // Parse cert lấy serial
+    // Parse serial
     BIO* bio = BIO_new_mem_buf(certPEM.data(), (int)certPEM.size());
     X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
     BIO_free(bio);
     if (!cert) return false;
 
-    outSerial = (int)ASN1_INTEGER_get(X509_get_serialNumber(cert));
+    outSerial = (int)ASN1_INTEGER_get(
+        X509_get_serialNumber(cert));
     X509_free(cert);
 
-    // Kết nối CA hỏi trạng thái
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    // Route đến đúng CA dựa vào serial
+    int port = (outSerial >= 2000)
+        ? Config::PORT_INTERMED_CA
+        : Config::PORT_CA;
+    std::string caCertPath = (outSerial >= 2000)
+        ? Config::INTERMED_CA_CERT()
+        : Config::CA_CERT();
+
+    SSL_CTX* ctx = Network::createClientContext(caCertPath);
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5000);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", port);
     if (!ssl) { Network::freeContext(ctx); return false; }
 
     Message req;
     req.type = MessageType::VERIFY_CERT;
-    req.payload["serial"] = outSerial;
+    req.payload["serial"] = outSerial;  // dùng outSerial thay vì serial
     Protocol::sendMessage(ssl, req);
 
     Message resp = Protocol::recvMessage(ssl);
@@ -237,6 +245,9 @@ void handleLogin(SSL* ssl) {
 
         Utils::log(Utils::LogLevel::INFO, "ChatServer",
             "Login successful for: " + username);
+
+		// Ghi log audit cho sự kiện login thành công
+        Utils::auditLog("ChatServer", "LOGIN_SUCCESS", "username=" + username);
     }
     catch (std::exception& e) {
         Utils::log(Utils::LogLevel::ERR, "ChatServer",
@@ -253,10 +264,39 @@ void handleChat(SSL* ssl, const std::string& username,
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
         username + " entered chat mode");
 
-    // Dang ky online
+    // Đăng ký online trước
     {
         std::lock_guard<std::mutex> lock(g_onlineMutex);
         g_onlineClients[username] = ssl;
+    }
+
+    // Gửi danh sách online hiện tại cho user mới vào
+    {
+        std::lock_guard<std::mutex> lock(g_onlineMutex);
+        json userList = json::array();
+        for (auto& [u, _] : g_onlineClients) {
+            if (u != username) userList.push_back(u);
+        }
+        Message listMsg;
+        listMsg.type = MessageType::ONLINE_USERS_LIST;
+        listMsg.payload["users"] = userList;
+        try { Protocol::sendMessage(ssl, listMsg); }
+        catch (...) {}
+    }
+
+    // Broadcast USER_ONLINE đến tất cả (trừ bản thân)
+    {
+        std::lock_guard<std::mutex> lock(g_onlineMutex);
+        Message onlineMsg;
+        onlineMsg.type = MessageType::USER_ONLINE;
+        onlineMsg.payload["user"] = username;
+
+        for (auto& [u, uSSL] : g_onlineClients) {
+            if (u != username) {
+                try { Protocol::sendMessage(uSSL, onlineMsg); }
+                catch (...) {}
+            }
+        }
     }
 
     try {
@@ -309,6 +349,10 @@ void handleChat(SSL* ssl, const std::string& username,
                     Protocol::sendMessage(g_onlineClients[targetUser], req);
                     Utils::log(Utils::LogLevel::INFO, "ChatServer",
                         "KEY_EXCHANGE relayed to " + targetUser);
+
+					// Ghi log audit cho sự kiện trao đổi khóa
+                    Utils::auditLog("ChatServer", "KEY_EXCHANGE_RELAYED",
+                        "from=" + username + " to=" + targetUser);
                 }
                 else {
                     Message err; err.type = MessageType::ERROR_MSG;
@@ -356,6 +400,34 @@ void handleChat(SSL* ssl, const std::string& username,
                 }
             }
 
+			// Client xin danh sách online users
+            else if (req.type == MessageType::GET_ONLINE_USERS) {
+                std::lock_guard<std::mutex> lock(g_onlineMutex);
+                json userList = json::array();
+                for (auto& [u, _] : g_onlineClients) {
+                    if (u != username) userList.push_back(u);
+                }
+                Message resp;
+                resp.type = MessageType::ONLINE_USERS_LIST;
+                resp.payload["users"] = userList;
+                try { Protocol::sendMessage(ssl, resp); }
+                catch (...) {}
+            }
+
+			// Client báo offline — relay đến peer nếu đang chat
+            else if (req.type == MessageType::ERROR_MSG) {
+                // Client báo kết thúc session — relay đến peer
+                std::string targetUser = req.payload.value("target", "");
+                std::string reason = req.payload.value("reason", "");
+                if (reason == "session_ended" && !targetUser.empty()) {
+                    std::lock_guard<std::mutex> lock(g_onlineMutex);
+                    if (g_onlineClients.count(targetUser)) {
+                        req.payload["from"] = username;
+                        Protocol::sendMessage(g_onlineClients[targetUser], req);
+                    }
+                }
+            }   
+
             else {
                 Utils::log(Utils::LogLevel::WARN, "ChatServer",
                     "Unknown message type in chat mode");
@@ -368,13 +440,38 @@ void handleChat(SSL* ssl, const std::string& username,
             username + " disconnected: " + e.what());
     }
 
-    // Xoa khoi online list
+    // Xóa khỏi online list
+    // Notify đối phương nếu đang chat
+    // Tìm xem username này đang chat với ai
+    // bằng cách broadcast USER_OFFLINE đến tất cả online clients
     {
         std::lock_guard<std::mutex> lock(g_onlineMutex);
+
+        // Gửi USER_OFFLINE đến tất cả client còn online
+        // Họ sẽ tự biết mình có liên quan không
+        Message offlineMsg;
+        offlineMsg.type = MessageType::USER_OFFLINE;
+        offlineMsg.payload["user"] = username;
+        offlineMsg.payload["reason"] = "User disconnected";
+
+        for (auto& [onlineUser, onlineSSL] : g_onlineClients) {
+            if (onlineUser != username) {
+                try {
+                    Protocol::sendMessage(onlineSSL, offlineMsg);
+                }
+                catch (...) {
+                    // Nếu gửi thất bại thì bỏ qua
+                }
+            }
+        }
+
         g_onlineClients.erase(username);
     }
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
-        username + " went offline");
+        username + " went offline - notified online clients");
+
+	// Ghi log audit cho sự kiện user offline
+    Utils::auditLog("ChatServer", "USER_OFFLINE", "username=" + username);
 }
 
 // ─── Xử lý 1 client ───────────────────────────────────────────
@@ -383,7 +480,7 @@ void handleClient(SSL* ssl) {
         Message req = Protocol::recvMessage(ssl);
 
         if (req.type == MessageType::REGISTER_CERT) {
-            // Đăng ky account - xu ly nhu cu
+            // Đăng ký account - xử lý như cũ
             std::string username = req.payload["username"];
             std::string certPEM = req.payload["cert"];
             int64_t     timestamp = req.payload["timestamp"];
@@ -403,6 +500,9 @@ void handleClient(SSL* ssl) {
                 Message err; err.type = MessageType::ERROR_MSG;
                 err.payload["reason"] = "Certificate invalid or revoked";
                 Protocol::sendMessage(ssl, err);
+
+                Utils::auditLog("ChatServer", "LOGIN_REJECTED_REVOKED_CERT", "username=" + username);
+
                 goto cleanup;
             }
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
@@ -464,7 +564,6 @@ void handleClient(SSL* ssl) {
                 goto cleanup;
             }
 
-            // --- THE FIX IS HERE ---
             {
                 std::lock_guard<std::mutex> lock(g_accountMutex);
                 Account acc;
@@ -473,12 +572,15 @@ void handleClient(SSL* ssl) {
                 acc.pubKeyPEM = pubKeyPEM;
                 g_accounts[username] = acc;
             }
-            // Gọi saveChatDB() NGOÀI block của lock để tránh deadlock!
+            // Gọi saveChatDB() NGOÀI block của lock để tránh deadlock
             saveChatDB();
             // -----------------------
 
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
                 "Account created for: " + username);
+
+			// Ghi log audit cho CA về việc đăng ký account mới
+            Utils::auditLog("ChatServer", "ACCOUNT_REGISTERED", "username=" + username);
 
             Message success;
             success.type = MessageType::SUCCESS;
@@ -488,8 +590,8 @@ void handleClient(SSL* ssl) {
 
         else if (req.type == MessageType::CLIENT_AUTH) {
             // Route sang login handler
-            // Re-inject message vao handleLogin
-            // Xu ly truc tiep o day de tranh mat message
+            // Re-inject message vào handleLogin
+            // Xử lý trực tiếp ở đây để tránh mất message
             std::string username = req.payload["username"];
             std::string ticket_v_b64 = req.payload["ticket_v"];
             std::string auth_b64 = req.payload["authenticator"];
@@ -531,6 +633,20 @@ void handleClient(SSL* ssl) {
                 goto cleanup;
             }
 
+            // ── Check duplicate login ──────────────────────────────
+            {
+                std::lock_guard<std::mutex> lock(g_onlineMutex);
+                if (g_onlineClients.count(username)) {
+                    Utils::log(Utils::LogLevel::WARN, "ChatServer",
+                        "Duplicate login attempt for: " + username);
+                    Message err;
+                    err.type = MessageType::ERROR_MSG;
+                    err.payload["reason"] = "already_logged_in";
+                    Protocol::sendMessage(ssl, err);
+                    goto cleanup;
+                }
+            }
+
             {
                 std::lock_guard<std::mutex> lock(g_loginMutex);
                 LoginSession ls;
@@ -557,6 +673,9 @@ void handleClient(SSL* ssl) {
             Utils::log(Utils::LogLevel::INFO, "ChatServer",
                 "Login successful for: " + username);
 
+			// Ghi log audit cho sự kiện login thành công
+            Utils::auditLog("ChatServer", "LOGIN_SUCCESS", "username=" + username);
+
             handleChat(ssl, username, Kc_v);
 
             {
@@ -577,23 +696,114 @@ void handleClient(SSL* ssl) {
     Network::closeConnection(ssl, sock);
 }
 
-// ─── Main ─────────────────────────────────────────────────────
-int main() {
-    Utils::log(Utils::LogLevel::INFO, "ChatServer",
-        "Starting Chat Server on port 5002...");
+bool initChatServer() {
+    Config::ensureCertDir();
 
-    // Kv phai giong voi KDC
-    g_Kv = Crypto::sha256({ 'K','v','_','S','e','c','r','e','t','_','C','h','a','t' });
+    // Thu load neu da co san
+    std::string certPEM = Utils::loadPEM(Config::CHAT_CERT());
+    std::string keyPEM = Utils::loadPEM(Config::CHAT_KEY());
+
+    if (certPEM.empty() || keyPEM.empty()) {
+        // Download CA cert neu chua co
+        std::string caCertPEM = Utils::loadPEM(Config::CA_CERT());
+        if (caCertPEM.empty()) {
+            Utils::log(Utils::LogLevel::INFO, "ChatServer", "Downloading CA cert...");
+            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+            SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CA);
+            if (!ssl) {
+                Utils::log(Utils::LogLevel::ERR, "ChatServer", "Cannot connect to CA - start CA first!");
+                SSL_CTX_free(ctx);
+                return false;
+            }
+            Message req; req.type = MessageType::GET_CA_CERT;
+            Protocol::sendMessage(ssl, req);
+            Message resp = Protocol::recvMessage(ssl);
+            if (resp.type == MessageType::CERT_RESPONSE) {
+                caCertPEM = resp.payload["cert"];
+                Utils::savePEM(Config::CA_CERT(), caCertPEM);
+                Utils::log(Utils::LogLevel::INFO, "ChatServer", "CA cert downloaded");
+            }
+            int s = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, s);
+            SSL_CTX_free(ctx);
+        }
+
+        // Xin CA ky cert cho Chat Server
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Requesting cert from CA...");
+        std::string intermCACertPEM = Utils::loadPEM(
+            Config::INTERMED_CA_CERT());
+        if (intermCACertPEM.empty()) {
+            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+            SSL* ssl = Network::connectToServer(
+                ctx, "127.0.0.1", Config::PORT_INTERMED_CA);
+            if (ssl) {
+                Message req;
+                req.type = MessageType::GET_INTERMED_CA_CERT;
+                Protocol::sendMessage(ssl, req);
+                Message resp = Protocol::recvMessage(ssl);
+                if (resp.type == MessageType::CERT_RESPONSE) {
+                    intermCACertPEM = resp.payload["cert"];
+                    // Luu chain file
+                    std::string chain = resp.payload["chain"];
+                    Utils::savePEM(Config::INTERMED_CA_CERT(),
+                        intermCACertPEM);
+                    Utils::savePEM(Config::CA_CHAIN(), chain);
+                }
+                int s = SSL_get_fd(ssl);
+                Network::closeConnection(ssl, s);
+            }
+            SSL_CTX_free(ctx);
+        }
+
+        bool ok = Crypto::requestCertFromCA(
+            "SecureChat-ChatServer", 365,
+            "127.0.0.1", Config::PORT_INTERMED_CA, // <- IntermCA
+            intermCACertPEM, certPEM, keyPEM
+        );
+
+        if (!ok) {
+            Utils::log(Utils::LogLevel::ERR, "ChatServer", "Failed to get cert from CA");
+            return false;
+        }
+
+        Utils::savePEM(Config::CHAT_CERT(), certPEM);
+        Utils::savePEM(Config::CHAT_KEY(), keyPEM);
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Chat Server cert saved");
+    }
+    else {
+        Utils::log(Utils::LogLevel::INFO, "ChatServer", "Loaded existing Chat Server cert");
+    }
+
+    // Giu nguyen phan sinh Kv
+    std::vector<unsigned char> kvBytes(
+        Config::KV_SECRET().begin(), Config::KV_SECRET().end());
+    g_Kv = Crypto::sha256(kvBytes);
 
     loadChatDB();
+    Utils::log(Utils::LogLevel::INFO, "ChatServer", "Chat Server ready");
+    return true;
+}
+
+// ─── Main ─────────────────────────────────────────────────────
+int main() {
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
+
+    Utils::log(Utils::LogLevel::INFO, "ChatServer",
+        "Starting Chat Server on port " +
+        std::to_string(Config::PORT_CHAT) + "...");
+
+    if (!initChatServer()) {
+        Utils::log(Utils::LogLevel::ERR, "ChatServer", "Init failed");
+        return 1;
+    }
 
     SSL_CTX* ctx = Network::createServerContext(
-        "C:\\SecureChatCerts\\chatserver.crt",
-        "C:\\SecureChatCerts\\chatserver.key"
-    );
+        Config::CHAT_CERT(), Config::CHAT_KEY());
     if (!ctx) return 1;
 
-    int serverSock = Network::createServerSocket(5002);
+    int serverSock = Network::createServerSocket(Config::PORT_CHAT);
     if (serverSock < 0) return 1;
 
     Utils::log(Utils::LogLevel::INFO, "ChatServer",
@@ -603,7 +813,6 @@ int main() {
         int clientSock = 0;
         SSL* ssl = Network::acceptClient(ctx, serverSock, clientSock);
         if (!ssl) continue;
-
         std::thread t(handleClient, ssl);
         t.detach();
     }

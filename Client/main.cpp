@@ -31,10 +31,10 @@ bool registerCert(const std::string& username) {
     Utils::log(Utils::LogLevel::INFO, "Client", "Starting cert registration for: " + username);
 
     // Bước 1: Kết nối TLS đến RA
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5001);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_RA);
     if (!ssl) {
         Network::freeContext(ctx);
         return false;
@@ -81,8 +81,8 @@ bool registerCert(const std::string& username) {
             Utils::log(Utils::LogLevel::INFO, "Client", "Certificate received!");
 
             // Lưu cert + key ra file
-            saveToFile("C:\\SecureChatCerts\\" + username + ".crt", certPEM);
-            saveToFile("C:\\SecureChatCerts\\" + username + ".key", privKeyPEM);
+            saveToFile(Config::userCert(username), certPEM);
+            saveToFile(Config::userKey(username), privKeyPEM);
 
             Utils::log(Utils::LogLevel::INFO, "Client",
                 "Cert saved to C:\\SecureChatCerts\\" + username + ".crt");
@@ -115,8 +115,8 @@ bool registerAccount(const std::string& username) {
         "Starting account registration with Chat Server for: " + username);
 
     // Load cert và private key đã lưu từ bước trước
-    std::string certPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".crt");
-    std::string privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+    std::string certPEM = loadFromFile(Config::userCert(username));
+    std::string privKeyPEM = loadFromFile(Config::userKey(username));
 
     if (certPEM.empty() || privKeyPEM.empty()) {
         Utils::log(Utils::LogLevel::ERR, "Client",
@@ -125,10 +125,10 @@ bool registerAccount(const std::string& username) {
     }
 
     // Bước 1: Kết nối TLS đến Chat Server
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5002);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CHAT);
     if (!ssl) {
         Network::freeContext(ctx);
         return false;
@@ -212,8 +212,8 @@ bool registerKDC(const std::string& username, KerberosSession& session) {
         "Starting KDC registration for: " + username);
 
     // Load cert + private key
-    std::string certPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".crt");
-    std::string privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+    std::string certPEM = loadFromFile(Config::userCert(username));
+    std::string privKeyPEM = loadFromFile(Config::userKey(username));
     if (certPEM.empty() || privKeyPEM.empty()) {
         Utils::log(Utils::LogLevel::ERR, "Client", "Cert/key not found");
         return false;
@@ -230,10 +230,10 @@ bool registerKDC(const std::string& username, KerberosSession& session) {
     session.Kc = Crypto::sha256(clientHash); // Kc = Hash(Hash(password))
 
     // Kết nối KDC
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5003);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_KDC);
     if (!ssl) { Network::freeContext(ctx); return false; }
     Utils::log(Utils::LogLevel::INFO, "Client", "Connected to KDC via TLS");
 
@@ -299,10 +299,10 @@ cleanup:
 bool getTicketFromAS(const std::string& username, KerberosSession& session) {
     Utils::log(Utils::LogLevel::INFO, "Client", "Requesting TGT from AS...");
 
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5003);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_KDC);
     if (!ssl) { Network::freeContext(ctx); return false; }
 
     // Gửi AS_REQUEST
@@ -383,10 +383,10 @@ cleanup:
 bool getServiceTicket(const std::string& username, KerberosSession& session) {
     Utils::log(Utils::LogLevel::INFO, "Client", "Requesting Service Ticket from TGS...");
 
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5003);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_KDC);
     if (!ssl) { Network::freeContext(ctx); return false; }
 
     // Tạo Authenticator mã hóa bằng Kc_tgs
@@ -712,10 +712,10 @@ bool loginToServer(const std::string& username,
     Utils::log(Utils::LogLevel::INFO, "Client",
         "Logging in to Chat Server...");
 
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return false;
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5002);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CHAT);
     if (!ssl) { Network::freeContext(ctx); return false; }
 
     // Tao Authenticator
@@ -793,16 +793,16 @@ void testReplayAttack(const std::string& username) {
     Utils::log(Utils::LogLevel::INFO, "Client",
         "=== REPLAY ATTACK TEST ===");
 
-    std::string certPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".crt");
-    std::string privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+    std::string certPEM = loadFromFile(Config::userCert(username));
+    std::string privKeyPEM = loadFromFile(Config::userKey(username));
     if (certPEM.empty() || privKeyPEM.empty()) {
         Utils::log(Utils::LogLevel::ERR, "Client", "No cert/key found");
         return;
     }
 
     // ── Lan 1: Ket noi binh thuong, lay nonce ─────────────────
-    SSL_CTX* ctx1 = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
-    SSL* ssl1 = Network::connectToServer(ctx1, "127.0.0.1", 5001);
+    SSL_CTX* ctx1 = Network::createClientContext(Config::CA_CERT());
+    SSL* ssl1 = Network::connectToServer(ctx1, "127.0.0.1", Config::PORT_RA);
     if (!ssl1) { Network::freeContext(ctx1); return; }
 
     // Nhan challenge
@@ -840,8 +840,8 @@ void testReplayAttack(const std::string& username) {
     Utils::log(Utils::LogLevel::WARN, "Client",
         "Attempting REPLAY with same nonce...");
 
-    SSL_CTX* ctx2 = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
-    SSL* ssl2 = Network::connectToServer(ctx2, "127.0.0.1", 5001);
+    SSL_CTX* ctx2 = Network::createClientContext(Config::CA_CERT());
+    SSL* ssl2 = Network::connectToServer(ctx2, "127.0.0.1", Config::PORT_RA);
     if (!ssl2) { Network::freeContext(ctx2); return; }
 
     // Bo qua challenge moi, dung nonce cu
@@ -885,7 +885,7 @@ int main() {
     std::cin >> username;
 
     // Load private key neu co san
-    std::string privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+    std::string privKeyPEM = loadFromFile(Config::userKey(username));
 
     KerberosSession session;
 
@@ -906,7 +906,7 @@ int main() {
             system("pause"); return 1;
         }
         // Reload sau khi register
-        privKeyPEM = loadFromFile("C:\\SecureChatCerts\\" + username + ".key");
+        privKeyPEM = loadFromFile(Config::userKey(username));
     }
 
     if (choice == 2 || choice == 5) {

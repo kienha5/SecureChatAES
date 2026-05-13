@@ -3,6 +3,7 @@
 #include "../Common/utils.h"
 #include <openssl/ssl.h>
 #include <stdexcept>
+#include <winsock2.h>
 
 namespace Protocol {
 
@@ -17,6 +18,12 @@ namespace Protocol {
         case MessageType::CERT_STATUS:   return "CERT_STATUS";
         case MessageType::SUCCESS:       return "SUCCESS";
         case MessageType::ERROR_MSG:     return "ERROR_MSG";
+        case MessageType::GET_CA_CERT: return "GET_CA_CERT";
+
+        case MessageType::USER_OFFLINE: return "USER_OFFLINE";
+        case MessageType::GET_ONLINE_USERS:  return "GET_ONLINE_USERS";
+        case MessageType::ONLINE_USERS_LIST: return "ONLINE_USERS_LIST";
+        case MessageType::USER_ONLINE:       return "USER_ONLINE";
 
         case MessageType::REVOKE_CERT:    return "REVOKE_CERT";
         case MessageType::REVOKE_SUCCESS: return "REVOKE_SUCCESS";
@@ -37,6 +44,9 @@ namespace Protocol {
         case MessageType::KEY_ACK:          return "KEY_ACK";
         case MessageType::CHAT_MESSAGE:     return "CHAT_MESSAGE";
 
+        case MessageType::GET_INTERMED_CA_CERT: return "GET_INTERMED_CA_CERT";
+        case MessageType::SIGN_CERT_REQ:        return "SIGN_CERT_REQ";
+
         default:                         return "UNKNOWN";
         }
     }
@@ -50,6 +60,12 @@ namespace Protocol {
         if (s == "CERT_STATUS")    return MessageType::CERT_STATUS;
         if (s == "SUCCESS")        return MessageType::SUCCESS;
         if (s == "ERROR_MSG")      return MessageType::ERROR_MSG;
+        if (s == "GET_CA_CERT") return MessageType::GET_CA_CERT;
+
+        if (s == "USER_OFFLINE") return MessageType::USER_OFFLINE;
+        if (s == "GET_ONLINE_USERS")  return MessageType::GET_ONLINE_USERS;
+        if (s == "ONLINE_USERS_LIST") return MessageType::ONLINE_USERS_LIST;
+        if (s == "USER_ONLINE")       return MessageType::USER_ONLINE;
 
         if (s == "REVOKE_CERT")    return MessageType::REVOKE_CERT;
         if (s == "REVOKE_SUCCESS") return MessageType::REVOKE_SUCCESS;
@@ -69,6 +85,9 @@ namespace Protocol {
         if (s == "KEY_EXCHANGE")     return MessageType::KEY_EXCHANGE;
         if (s == "KEY_ACK")          return MessageType::KEY_ACK;
         if (s == "CHAT_MESSAGE")     return MessageType::CHAT_MESSAGE;
+
+        if (s == "GET_INTERMED_CA_CERT") return MessageType::GET_INTERMED_CA_CERT;
+        if (s == "SIGN_CERT_REQ")        return MessageType::SIGN_CERT_REQ;
 
         throw std::runtime_error("Unknown message type: " + s);
     }

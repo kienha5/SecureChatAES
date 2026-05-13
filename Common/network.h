@@ -2,6 +2,11 @@
 #include <string>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#include <openssl/crypto.h>
+#include <vector>
+#include <mutex>
 
 namespace Network {
     // Server
@@ -16,4 +21,6 @@ namespace Network {
     // Cleanup
     void closeConnection(SSL* ssl, int sock);
     void freeContext(SSL_CTX* ctx);
+
+    void initOpenSSLThreading();
 }

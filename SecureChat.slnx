@@ -7,7 +7,9 @@
   <Project Path="CA_Server/CA_Server.vcxproj" Id="ac3a97c7-7a59-4b66-afa9-2b22fae9149e" />
   <Project Path="Chat_Server/Chat_Server.vcxproj" Id="f847359c-0dfc-4f58-acd2-91c909a7f5c9" />
   <Project Path="Client/Client.vcxproj" Id="fc1a3347-53d0-405f-823e-7d187da72388" />
+  <Project Path="Client_GUI/Client_GUI.vcxproj" Id="4e567eaf-e412-4c57-807f-edf7d9fd97db" />
   <Project Path="Common/Common.vcxproj" Id="2034fc10-9439-4636-b18c-4e28c79cbfb3" />
+  <Project Path="IntermediateCA_Server/IntermediateCA_Server.vcxproj" Id="e439f3dd-eef6-47b4-8434-a05fa51d3ef5" />
   <Project Path="KDC_Server/KDC_Server.vcxproj" Id="50ac961e-3db9-41c2-a5ea-286b4ccca665" />
   <Project Path="RA_Server/RA_Server.vcxproj" Id="cd05b72e-01f3-4701-9128-7e666571b446" />
 </Solution>

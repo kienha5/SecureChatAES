@@ -36,6 +36,9 @@
     <ClInclude Include="network.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="config.h">
+      <Filter>include</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Common.cpp">

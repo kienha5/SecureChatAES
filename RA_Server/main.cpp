@@ -6,6 +6,10 @@
 #include "../Common/crypto.h"
 #include "../Common/message.h"
 #include "../Common/network.h"
+#include "../Common/config.h"
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/pem.h>
 #include <set>
 #include <mutex>
 
@@ -15,10 +19,10 @@ static std::mutex g_nonceMutex;
 
 // ─── Forward request đến CA ───────────────────────────────────
 std::string forwardToCA(const std::string& username, const std::string& pubKeyPEM) {
-    SSL_CTX* ctx = Network::createClientContext("C:\\SecureChatCerts\\ca.crt");
+    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT());
     if (!ctx) return "";
 
-    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", 5000);
+    SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CA);
     if (!ssl) { Network::freeContext(ctx); return ""; }
 
     // Gửi ISSUE_CERT_REQ đến CA
@@ -44,6 +48,87 @@ std::string forwardToCA(const std::string& username, const std::string& pubKeyPE
     Network::closeConnection(ssl, sock);
     Network::freeContext(ctx);
     return certPEM;
+}
+
+bool initRA() {
+    Config::ensureCertDir();
+
+    // Thu load neu da co san
+    std::string certPEM = Utils::loadPEM(Config::RA_CERT());
+    std::string keyPEM = Utils::loadPEM(Config::RA_KEY());
+    if (!certPEM.empty() && !keyPEM.empty()) {
+        Utils::log(Utils::LogLevel::INFO, "RA", "Loaded existing RA cert");
+        return true;
+    }
+
+    // Download CA cert neu chua co
+    std::string caCertPEM = Utils::loadPEM(Config::CA_CERT());
+    if (caCertPEM.empty()) {
+        Utils::log(Utils::LogLevel::INFO, "RA", "Downloading CA cert...");
+        SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+        SSL* ssl = Network::connectToServer(ctx, "127.0.0.1", Config::PORT_CA);
+        if (!ssl) {
+            Utils::log(Utils::LogLevel::ERR, "RA", "Cannot connect to CA!");
+            SSL_CTX_free(ctx);
+            return false;
+        }
+        Message req; req.type = MessageType::GET_CA_CERT;
+        Protocol::sendMessage(ssl, req);
+        Message resp = Protocol::recvMessage(ssl);
+        if (resp.type == MessageType::CERT_RESPONSE) {
+            caCertPEM = resp.payload["cert"];
+            Utils::savePEM(Config::CA_CERT(), caCertPEM);
+            Utils::log(Utils::LogLevel::INFO, "RA", "CA cert downloaded");
+        }
+        int s = SSL_get_fd(ssl);
+        Network::closeConnection(ssl, s);
+        SSL_CTX_free(ctx);
+    }
+
+    // Xin CA ký cert cho RA
+    // Download IntermCA cert trước
+    std::string intermCACertPEM = Utils::loadPEM(
+        Config::INTERMED_CA_CERT());
+    if (intermCACertPEM.empty()) {
+        SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+        SSL* ssl = Network::connectToServer(
+            ctx, "127.0.0.1", Config::PORT_INTERMED_CA);
+        if (ssl) {
+            Message req;
+            req.type = MessageType::GET_INTERMED_CA_CERT;
+            Protocol::sendMessage(ssl, req);
+            Message resp = Protocol::recvMessage(ssl);
+            if (resp.type == MessageType::CERT_RESPONSE) {
+                intermCACertPEM = resp.payload["cert"];
+                // Lưu chain file
+                std::string chain = resp.payload["chain"];
+                Utils::savePEM(Config::INTERMED_CA_CERT(),
+                    intermCACertPEM);
+                Utils::savePEM(Config::CA_CHAIN(), chain);
+            }
+            int s = SSL_get_fd(ssl);
+            Network::closeConnection(ssl, s);
+        }
+        SSL_CTX_free(ctx);
+    }
+
+    bool ok = Crypto::requestCertFromCA(
+        "SecureChat-RA", 365,
+        "127.0.0.1", Config::PORT_INTERMED_CA, // <- IntermCA
+        intermCACertPEM, certPEM, keyPEM
+    );
+
+    if (!ok) {
+        Utils::log(Utils::LogLevel::ERR, "RA", "Failed to get cert from CA");
+        return false;
+    }
+
+    Utils::savePEM(Config::RA_CERT(), certPEM);
+    Utils::savePEM(Config::RA_KEY(), keyPEM);
+    Utils::log(Utils::LogLevel::INFO, "RA", "RA cert saved");
+    return true;
 }
 
 // ─── Xử lý 1 client ───────────────────────────────────────────
@@ -77,6 +162,9 @@ void handleClient(SSL* ssl) {
 
             Utils::log(Utils::LogLevel::INFO, "RA", "REGISTER_CERT from: " + username);
 
+			// Ghi log audit về request đăng ký (chỉ ghi username, không ghi nonce hay timestamp để tránh log quá nhiều)
+            Utils::auditLog("RA", "REGISTER_REQUEST", "username=" + username);
+
             // Bước 3: Check timestamp
             if (Utils::isExpired(clientTs)) {
                 Utils::log(Utils::LogLevel::WARN, "RA", "Timestamp expired");
@@ -98,6 +186,11 @@ void handleClient(SSL* ssl) {
                         "REPLAY ATTACK DETECTED - nonce already used: " + safeNonceLog + "...");
                     Utils::log(Utils::LogLevel::WARN, "RA",
                         "Request from potential attacker blocked");
+
+					// Ghi log audit về replay attack (ghi cả nonce và username để dễ điều tra, nhưng chỉ ghi một phần nonce)
+                    Utils::auditLog("RA", "REPLAY_DETECTED",   
+                        "nonce=" + clientNonce.substr(0, 16) +
+                        " username=" + username);
 
                     Message err; err.type = MessageType::ERROR_MSG;
                     err.payload["reason"] = "Replay attack detected - nonce already used";
@@ -132,6 +225,10 @@ void handleClient(SSL* ssl) {
             }
             Utils::log(Utils::LogLevel::INFO, "RA", "Signature OK for: " + username);
 
+			// Ghi log audit về việc đăng ký thành công 
+            // (ghi username, không ghi nonce hay signature để tránh log quá nhiều và bảo vệ thông tin nhạy cảm)
+            Utils::auditLog("RA", "SIGNATURE_OK", "username=" + username);
+
             // Bước 7: Forward đến CA
             std::string certPEM = forwardToCA(username, pubKeyPEM);
             if (certPEM.empty()) {
@@ -140,6 +237,9 @@ void handleClient(SSL* ssl) {
                 Protocol::sendMessage(ssl, err);
                 goto cleanup;
             }
+
+			// Ghi log audit về việc forward request đến CA (chỉ ghi username, không ghi chi tiết cert để tránh log quá nhiều)
+            Utils::auditLog("RA", "CERT_FORWARDED_TO_CA", "username=" + username);
 
             // Bước 8: Trả cert về cho client
             Message resp;
@@ -161,15 +261,25 @@ void handleClient(SSL* ssl) {
 
 // ─── Main ─────────────────────────────────────────────────────
 int main() {
-    Utils::log(Utils::LogLevel::INFO, "RA", "Starting RA Server on port 5001...");
+    Utils::initAuditLog(Config::AUDIT_LOG_DIR());
+
+    Utils::log(Utils::LogLevel::INFO, "RA",
+        "Starting RA Server on port " +
+        std::to_string(Config::PORT_RA) + "...");
+
+    // Phai init truoc de tao cert neu chua co
+    if (!initRA()) {
+        Utils::log(Utils::LogLevel::ERR, "RA", "Init failed");
+        return 1;
+    }
 
     SSL_CTX* ctx = Network::createServerContext(
-        "C:\\SecureChatCerts\\ra.crt",
-        "C:\\SecureChatCerts\\ra.key"
+        Config::RA_CERT(),
+        Config::RA_KEY()
     );
     if (!ctx) return 1;
 
-    int serverSock = Network::createServerSocket(5001);
+    int serverSock = Network::createServerSocket(Config::PORT_RA);
     if (serverSock < 0) return 1;
 
     Utils::log(Utils::LogLevel::INFO, "RA", "RA Server ready. Waiting for connections...");
@@ -178,7 +288,6 @@ int main() {
         int clientSock = 0;
         SSL* ssl = Network::acceptClient(ctx, serverSock, clientSock);
         if (!ssl) continue;
-
         std::thread t(handleClient, ssl);
         t.detach();
     }
