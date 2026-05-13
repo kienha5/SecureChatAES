@@ -50,7 +50,7 @@ Mở `SecureChat.sln` trong Visual Studio, bấm **Ctrl+Shift+B** để build to
 
 ---
 
-## Chạy chương trình
+## Chạy chương trình (sau khi build release)
 
 Các server và client phải được khởi động **đúng thứ tự** sau:
 
@@ -68,6 +68,34 @@ Tất cả file `.exe` nằm trong thư mục `x64\Debug\` hoặc `x64\Release\`
 > **Lần đầu chạy:** Các server sẽ tự động tạo certificates và lưu vào thư mục
 > `SecureChatCerts\` ở root của solution. Không cần tạo thủ công.
 
+## Cấu hình chạy nhiều project cùng lúc (khuyến nghị)
+
+Thay vì mở từng file `.exe` thủ công, có thể cấu hình Visual Studio
+chạy tất cả server cùng lúc:
+
+1. Chuột phải vào **Solution** trong Solution Explorer → **Properties**
+2. Chọn **Common Properties → Startup Project**
+3. Chọn **Multiple startup projects**
+4. Cấu hình như sau:
+
+| Project | Action |
+|---|---|
+| `CA_Server` | Start |
+| `IntermediateCA_Server` | Start |
+| `RA_Server` | Start |
+| `KDC_Server` | Start |
+| `Chat_Server` | Start |
+| `Client_GUI` | Start |
+| `Client` | None |
+| `Common` | None |
+| `Admin` | None |
+
+5. Bấm **OK**
+6. Bấm **F5** hoặc **Ctrl+F5** để chạy tất cả cùng lúc
+
+> **Lưu ý:** Visual Studio khởi động tất cả project gần như cùng lúc.
+> Client_GUI có sẵn delay 2 giây khi khởi động để chờ các server
+> sẵn sàng. Nếu gặp lỗi kết nối, đóng tất cả và chạy lại.
 ---
 
 ## Sử dụng (GUI Client)
