@@ -361,3 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# SecureChat specific
+SecureChatCerts/
+AuditLogs/
+
+# vcpkg - khong commit
+vcpkg/
+vcpkg_installed/

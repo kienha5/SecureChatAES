@@ -100,21 +100,32 @@ void CleanupRenderTarget() {
     if (g_mainRTV) { g_mainRTV->Release(); g_mainRTV = nullptr; }
 }
 
-LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT WINAPI WndProc(HWND hWnd, UINT msg,
+    WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return true;
+
     switch (msg) {
+    case WM_CLOSE:
+        // Intercept X button - shutdown sach truoc khi destroy
+        shutdownApp();
+        DestroyWindow(hWnd);
+        return 0;
+
     case WM_SIZE:
         if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
             CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam),
+            g_pSwapChain->ResizeBuffers(0,
+                LOWORD(lParam), HIWORD(lParam),
                 DXGI_FORMAT_UNKNOWN, 0);
             CreateRenderTarget();
         }
         return 0;
+
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -178,16 +189,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         g_pSwapChain->Present(1, 0);
     }
 
-    // Cleanup
+    // Cleanup cuối WinMain - SSL đã được đóng trong shutdownApp()
+    // Nên chỉ cần cleanup ImGui và D3D11
+
     if (g_app.chatSSL) {
-        int s = SSL_get_fd(g_app.chatSSL);
-        Network::closeConnection(g_app.chatSSL, s);
+        // Trường hợp shutdownApp chưa được gọi (ví dụ terminate)
+        shutdownApp();
     }
+
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return 0;
     return 0;
 }

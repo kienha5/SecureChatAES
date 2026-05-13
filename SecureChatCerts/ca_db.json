@@ -1,7 +1,7 @@
 {
   "certs": [
     {
-      "revoked": false,
+      "revoked": true,
       "serial": 1,
       "username": "SecureChat-RA"
     },
@@ -24,7 +24,17 @@
       "revoked": false,
       "serial": 5,
       "username": "bob"
+    },
+    {
+      "revoked": false,
+      "serial": 6,
+      "username": "joe"
+    },
+    {
+      "revoked": false,
+      "serial": 7,
+      "username": "alice_replaytest"
     }
   ],
-  "serial_counter": 6
+  "serial_counter": 8
 }

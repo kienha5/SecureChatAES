@@ -10,12 +10,20 @@
 #include <openssl/ssl.h>
 #include <queue>
 
-enum class AppScreen { LOGIN, MAIN };
+enum class AppScreen { LOGIN, MAIN, SECURITY_TEST};
 
 struct ChatMessage {
     std::string from;
     std::string text;
     bool isMe;
+};
+
+// Kết quả security test
+struct TestResult {
+    std::string name;
+    bool        passed;
+    std::string detail;
+    bool        done = false;
 };
 
 struct AppState {
@@ -58,6 +66,10 @@ struct AppState {
     std::deque<std::pair<std::string, bool>> logs;
     std::mutex logMutex;
 
+	// Kết quả security tests
+    std::vector<TestResult> testResults;
+    std::mutex testResultsMutex;
+
     // ── Input queue: GUI push, network thread pop ──────────────
     // Thay thế toàn bộ sendQueue + sendQueueMutex + sendQueueCV
     // + handshakeMutex + sslMutex
@@ -81,7 +93,7 @@ struct AppState {
 	// Handshaking flag để tránh
     std::atomic<bool> isHandshaking{ false };
 
-    // Queue cho handshake messages (KEY_EXCHANGE tu phia A gui den)
+    // Queue cho handshake messages (KEY_EXCHANGE từ phía A gửi đến)
     std::queue<Message> handshakeQueue;
     std::mutex          handshakeQueueMutex;
     std::condition_variable handshakeQueueCV;
@@ -157,4 +169,55 @@ inline void removeOnlineUser(const std::string& user) {
             g_app.onlineUsers.end(), user),
         g_app.onlineUsers.end()
     );
+}
+
+inline void addTestResult(const std::string& name,
+    bool passed,
+    const std::string& detail) {
+    std::lock_guard<std::mutex> lock(g_app.testResultsMutex);
+    // Tìm xem đã có result cho test này chưa
+    for (auto& r : g_app.testResults) {
+        if (r.name == name) {
+            r.passed = passed;
+            r.detail = detail;
+            r.done = true;
+            return;
+        }
+    }
+    g_app.testResults.push_back({ name, passed, detail, true });
+}
+
+inline void shutdownApp() {
+    // Bước 1: Set flag dừng tất cả thread
+    g_app.connected = false;
+    g_app.chatReady = false;
+
+    // Bước 2: Wake up tất cả thread đang wait
+    g_app.inputQueueCV.notify_all();
+    g_app.chatMsgQueueCV.notify_all();
+    g_app.handshakeQueueCV.notify_all();
+
+    // Bước 3: Đợi để dispatcher thread thoát khỏi SSL_read
+    // SSL_read sẽ return lỗi sau khi socket đóng
+    // Đợi tối đa 500ms
+    Sleep(500);
+
+    // Bước 4: Giờ mới đóng SSL
+    if (g_app.chatSSL) {
+        // Lấy socket trước khi shutdown
+        int sock = SSL_get_fd(g_app.chatSSL);
+
+        // shutdown SSL gracefully
+        SSL_shutdown(g_app.chatSSL);
+        SSL_free(g_app.chatSSL);
+        g_app.chatSSL = nullptr;
+
+        // Đóng socket
+        if (sock >= 0) closesocket(sock);
+    }
+
+    if (g_app.chatCtx) {
+        SSL_CTX_free(g_app.chatCtx);
+        g_app.chatCtx = nullptr;
+    }
 }

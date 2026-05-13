@@ -1,5 +1,6 @@
-#include <openssl/applink.c>
 #define _CRT_SECURE_NO_WARNINGS
+
+#include <openssl/applink.c>
 #include "../Common/pch.h"
 #include "../Common/utils.h"
 #include "../Common/crypto.h"

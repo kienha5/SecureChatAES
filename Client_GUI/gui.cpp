@@ -10,6 +10,7 @@
 #include <d3d11.h>
 #include <thread>
 #include <algorithm>
+#include "security_tests.h"
 
 // Chi extern nhung gi D3D11 can
 extern ID3D11Device* g_pd3dDevice;
@@ -285,7 +286,13 @@ static void renderChatScreen() {
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.75f, 0.45f, 1.0f));
     ImGui::Text("  [E2EE]  Logged in as: %s", g_app.myUsername.c_str());
     ImGui::PopStyleColor();
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80);
+    
+    float windowW = ImGui::GetWindowWidth();
+    ImGui::SameLine(windowW - 300);  // offset từ trái window
+    if (ImGui::SmallButton("Security Tests")) {
+        g_app.screen = AppScreen::SECURITY_TEST;
+    }
+    ImGui::SameLine(windowW - 90);   // offset từ trái window
 
     if (ImGui::SmallButton("Logout")) {
         g_app.connected = false;
@@ -494,13 +501,136 @@ static void renderChatScreen() {
     ImGui::End();
 }
 
-// ─── Entry point cho render loop ─────────────────────────────
+// Them ham render moi trong gui.cpp:
+static void renderSecurityTestScreen() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({ 0, 0 });
+    ImGui::SetNextWindowSize(io.DisplaySize);
+
+    ImGui::Begin("##sectest", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove);
+
+    // Header
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        ImVec4(0.25f, 0.75f, 0.95f, 1.0f));
+    ImGui::Text("SECURITY TESTS");
+    ImGui::PopStyleColor();
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80);
+    if (ImGui::SmallButton("Back to Chat"))
+        g_app.screen = AppScreen::MAIN;
+    ImGui::Separator();
+
+    // Test buttons
+    std::string user(g_app.myUsername);
+    std::string ip(g_app.serverIP);
+
+    auto testCb = [](const std::string& name,
+        bool passed,
+        const std::string& detail) {
+            addTestResult(name, passed, detail);
+            addLog("[TEST] " + name + ": " + detail, !passed);
+        };
+
+    ImGui::Text("Run individual tests:");
+    ImGui::Spacing();
+
+    if (ImGui::Button("1. Replay Attack Test", { -1, 30 })) {
+        g_app.testResults.clear();
+        std::thread([user, ip, testCb]() {
+            SecurityTests::testReplayAttack(user, ip, testCb);
+            }).detach();
+    }
+
+    if (ImGui::Button("2. Wrong Password Test", { -1, 30 })) {
+        std::thread([user, ip, testCb]() {
+            SecurityTests::testWrongPassword(user, ip, testCb);
+            }).detach();
+    }
+
+    // Giữ nguyên phần UI lấy lifetime và password
+    ImGui::Text("KDC lifetime (seconds for expired test):");
+    static int lifetime = 10;
+    ImGui::SliderInt("##lifetime", &lifetime, 5, 30);
+    static char testPass[64] = {};
+    ImGui::Text("Password:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150);
+    ImGui::InputText("##testpass", testPass, sizeof(testPass), ImGuiInputTextFlags_Password);
+    ImGui::SameLine();
+
+    if (ImGui::Button("3. Expired Ticket Test")) {
+        // Make non-static copies to avoid capturing static-duration variables in lambda
+        std::string passStr(testPass); // Copy sang std::string để an toàn khi đẩy vào thread
+        int lifetime_copy = lifetime;
+        std::thread([user, passStr, ip, lifetime_copy, testCb]() {
+            SecurityTests::testExpiredTicket(user, passStr, ip, lifetime_copy, testCb);
+            }).detach();
+    }
+
+    static int revokeSerial = 1;
+    ImGui::Text("Cert serial to revoke:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("##serial", &revokeSerial);
+    ImGui::SameLine();
+
+    if (ImGui::Button("4. Revoked Cert Test")) {
+        int revokeSerialCopy = revokeSerial; // copy static to local before capturing
+        std::thread([user, ip, revokeSerialCopy, testCb]() {
+            SecurityTests::testRevokedCert(user, ip, revokeSerialCopy, testCb);
+            }).detach();
+    }
+
+    if (ImGui::Button("5. Chain Validation Test", { -1, 30 })) {
+        std::thread([user, testCb]() {
+            SecurityTests::testChainValidation(user, testCb);
+            }).detach();
+    }
+
+    if (ImGui::Button("6. MITM Detection Test", { -1, 30 })) {
+        std::thread([ip, testCb]() {
+            SecurityTests::testMITMDetection(ip, testCb);
+            }).detach();
+    }
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    // Ket qua
+    ImGui::Text("Results:");
+    ImGui::BeginChild("##results", { 0, 0 }, true);
+    {
+        std::lock_guard<std::mutex> lock(
+            g_app.testResultsMutex);
+        for (auto& r : g_app.testResults) {
+            ImVec4 col = r.passed
+                ? ImVec4(0.25f, 0.85f, 0.45f, 1.0f)
+                : ImVec4(0.90f, 0.35f, 0.35f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::Text("%s %s",
+                r.passed ? "[PASS]" : "[FAIL]",
+                r.name.c_str());
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImVec4(0.70f, 0.70f, 0.70f, 1.0f));
+            ImGui::TextWrapped("  %s", r.detail.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::End();
+}
+
 void renderFrame() {
     static bool themeApplied = false;
     if (!themeApplied) { applyTheme(); themeApplied = true; }
 
     switch (g_app.screen) {
-    case AppScreen::LOGIN: renderLoginScreen(); break;
-    case AppScreen::MAIN:  renderChatScreen();  break;
+    case AppScreen::LOGIN:         renderLoginScreen();        break;
+    case AppScreen::MAIN:          renderChatScreen();         break;
+    case AppScreen::SECURITY_TEST: renderSecurityTestScreen(); break;
     }
 }

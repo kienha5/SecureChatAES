@@ -152,6 +152,7 @@ Ws2_32.lib;d3d11.lib
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="network_thread.cpp" />
+    <ClCompile Include="security_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Common\Common.vcxproj">
@@ -171,6 +172,7 @@ Ws2_32.lib;d3d11.lib
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="network_ops.h" />
     <ClInclude Include="network_thread.h" />
+    <ClInclude Include="security_tests.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
