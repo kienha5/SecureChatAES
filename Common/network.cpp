@@ -96,7 +96,11 @@ namespace Network {
         }
 
         if (SSL_CTX_load_verify_locations(ctx, caCertFile.c_str(), nullptr) <= 0) {
-            Utils::log(Utils::LogLevel::ERR, "Network", "Failed to load CA cert: " + caCertFile);
+            // In ra lỗi OpenSSL cụ thể để debug
+            char errBuf[256];
+            ERR_error_string_n(ERR_get_error(), errBuf, sizeof(errBuf));
+            Utils::log(Utils::LogLevel::ERR, "Network",
+                "Failed to load CA cert: " + caCertFile + " — " + errBuf);
             SSL_CTX_free(ctx);
             return nullptr;
         }

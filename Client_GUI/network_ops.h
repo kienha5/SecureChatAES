@@ -37,8 +37,13 @@ inline bool doRegisterCert(const std::string& username,
     std::string pub, priv;
     Crypto::generateRSAKeyPair(pub, priv);
 
-    // [SỬA LỖI 2]: Dùng .c_str() đề phòng hàm Network cần const char*
-    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
+    // Dùng .c_str() đề phòng hàm Network cần const char*
+    // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+    std::string chainFile = Config::CA_CHAIN();
+    if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+        chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+    }
+    SSL_CTX* ctx = Network::createClientContext(chainFile);
     if (!ctx) { log("Failed to create SSL context", true); return false; }
 
     SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_RA);
@@ -91,7 +96,12 @@ inline bool doRegisterAccount(const std::string& username,
     std::string privKeyPEM = loadFile(Config::userKey(username));
     if (certPEM.empty()) { log("No cert found - register cert first", true); return false; }
 
-    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
+    // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+    std::string chainFile = Config::CA_CHAIN();
+    if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+        chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+    }
+    SSL_CTX* ctx = Network::createClientContext(chainFile);
     SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_CHAT);
     if (!ssl) {
         log("Cannot connect to Chat Server port 5002", true);
@@ -150,7 +160,12 @@ inline bool doRegisterKDC(const std::string& username,
     auto clientHash = Crypto::sha256(pwBytes);
     outKc = Crypto::sha256(clientHash);
 
-    SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
+    // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+    std::string chainFile = Config::CA_CHAIN();
+    if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+        chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+    }
+    SSL_CTX* ctx = Network::createClientContext(chainFile);
     SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_KDC);
     if (!ssl) {
         log("Cannot connect to KDC port 5003", true);
@@ -218,8 +233,13 @@ inline bool doLogin(const std::string& username,
     // ── AS request ────────────────────────────────────────────
     log("Requesting TGT from AS...", false);
     {
-        SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
-        // [SỬA LỖI 3]: Dùng Config::PORT_KDC thay vì gõ cứng 5003
+        // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+        std::string chainFile = Config::CA_CHAIN();
+        if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+            chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+        }
+        SSL_CTX* ctx = Network::createClientContext(chainFile);
+
         SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_KDC);
         if (!ssl) {
             log("Cannot connect to KDC", true);
@@ -266,7 +286,12 @@ inline bool doLogin(const std::string& username,
     // ── TGS request ───────────────────────────────────────────
     log("Requesting Service Ticket from TGS...", false);
     {
-        SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
+        // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+        std::string chainFile = Config::CA_CHAIN();
+        if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+            chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+        }
+        SSL_CTX* ctx = Network::createClientContext(chainFile);
         SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_KDC);
         if (!ssl) {
             log("Cannot connect to TGS", true);
@@ -313,7 +338,12 @@ inline bool doLogin(const std::string& username,
     // ── Chat Server login ─────────────────────────────────────
     log("Logging in to Chat Server...", false);
     {
-        SSL_CTX* ctx = Network::createClientContext(Config::CA_CERT().c_str());
+        // Dùng chain file để verify cert của RA/KDC/Chat (được ký bởi IntermCA)
+        std::string chainFile = Config::CA_CHAIN();
+        if (chainFile.empty() || !std::filesystem::exists(chainFile)) {
+            chainFile = Config::CA_CERT();  // fallback về RootCA nếu chưa có chain
+        }
+        SSL_CTX* ctx = Network::createClientContext(chainFile);
         // Dùng Config::PORT_CHAT thay vì gõ cứng 5002
         SSL* ssl = Network::connectToServer(ctx, serverIP.c_str(), Config::PORT_CHAT);
         if (!ssl) {

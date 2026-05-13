@@ -10,18 +10,22 @@ namespace Config {
         char buf[MAX_PATH];
         GetModuleFileNameA(nullptr, buf, MAX_PATH);
         std::filesystem::path currentPath(buf);
-        currentPath = currentPath.parent_path(); // Thư mục chứa file exe
+        currentPath = currentPath.parent_path();
 
-        // Trèo ngược lên cây thư mục cho đến khi thấy folder "Common"
-        while (currentPath.has_parent_path()) {
-            if (std::filesystem::exists(currentPath / "Common")) {
-                return currentPath.string() + "\\";
+        // Thử tìm folder chứa "Common" hoặc "SecureChatCerts"
+        std::filesystem::path search = currentPath;
+        while (search.has_parent_path()) {
+            if (std::filesystem::exists(search / "Common") ||
+                std::filesystem::exists(search / "SecureChatCerts")) {
+                return search.string() + "\\";
             }
-            currentPath = currentPath.parent_path();
+            auto parent = search.parent_path();
+            if (parent == search) break;  // đã lên root, dừng
+            search = parent;
         }
 
-        // Fallback: nếu không tìm thấy, trả về thư mục hiện tại của exe
-        return std::filesystem::path(buf).parent_path().string() + "\\";
+        // Fallback: thư mục chứa exe
+        return currentPath.string() + "\\";
     }
 
     // ─── Thu muc chua certs (nam tai Solution root) ───────────
